@@ -199,9 +199,9 @@ public:
   void fromPublicKeyString(const std::string& content) override;
   bool checkKey(vector<string> *errorMessages) const override;
 
-  static std::shared_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
+  static std::unique_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
   {
-    return std::make_shared<OpenSSLRSADNSCryptoKeyEngine>(algorithm);
+    return make_unique<OpenSSLRSADNSCryptoKeyEngine>(algorithm);
   }
 
 private:
@@ -288,7 +288,7 @@ DNSCryptoKeyEngine::storvector_t OpenSSLRSADNSCryptoKeyEngine::convertToISCVecto
   }
   storvect.push_back(make_pair("Algorithm", algorithm));
 
-  for(outputs_t::value_type value :  outputs) {
+  for(const outputs_t::value_type& value :  outputs) {
     std::string tmp;
     tmp.resize(BN_num_bytes(value.second));
     int len = BN_bn2bin(value.second, reinterpret_cast<unsigned char*>(&tmp.at(0)));
@@ -598,9 +598,9 @@ public:
   void fromPublicKeyString(const std::string& content) override;
   bool checkKey(vector<string> *errorMessages) const override;
 
-  static std::shared_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
+  static std::unique_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
   {
-    return std::make_shared<OpenSSLECDSADNSCryptoKeyEngine>(algorithm);
+    return make_unique<OpenSSLECDSADNSCryptoKeyEngine>(algorithm);
   }
 
 private:
@@ -883,9 +883,9 @@ public:
   void fromPublicKeyString(const std::string& content) override;
   bool checkKey(vector<string> *errorMessages) const override;
 
-  static std::shared_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
+  static std::unique_ptr<DNSCryptoKeyEngine> maker(unsigned int algorithm)
   {
-    return std::make_shared<OpenSSLEDDSADNSCryptoKeyEngine>(algorithm);
+    return make_unique<OpenSSLEDDSADNSCryptoKeyEngine>(algorithm);
   }
 
 private:

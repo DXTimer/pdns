@@ -11,7 +11,8 @@ class TestCaching(DNSDistTest):
     _config_template = """
     pc = newPacketCache(100, {maxTTL=86400, minTTL=1})
     getPool(""):setCache(pc)
-    addAction(makeRule("nocache.cache.tests.powerdns.com."), SkipCacheAction())
+    addAction(makeRule("nocache.cache.tests.powerdns.com."), SetSkipCacheAction())
+    addResponseAction(makeRule("nocache-response.cache.tests.powerdns.com."), SetSkipCacheResponseAction())
     function skipViaLua(dq)
         dq.skipCache = true
         return DNSAction.None, ""
@@ -138,7 +139,7 @@ class TestCaching(DNSDistTest):
 
     def testSkipCache(self):
         """
-        Cache: SkipCacheAction
+        Cache: SetSkipCacheAction
 
         dnsdist is configured to not cache entries for nocache.cache.tests.powerdns.com.
          we are sending several requests and checking that the backend get them all.
@@ -176,6 +177,38 @@ class TestCaching(DNSDistTest):
          we are sending several requests and checking that the backend get them all.
         """
         name = 'nocachevialua.cache.tests.powerdns.com.'
+        numberOfQueries = 10
+        query = dns.message.make_query(name, 'AAAA', 'IN')
+        response = dns.message.make_response(query)
+        rrset = dns.rrset.from_text(name,
+                                    3600,
+                                    dns.rdataclass.IN,
+                                    dns.rdatatype.AAAA,
+                                    '::1')
+        response.answer.append(rrset)
+
+        for _ in range(numberOfQueries):
+            for method in ("sendUDPQuery", "sendTCPQuery"):
+                sender = getattr(self, method)
+                (receivedQuery, receivedResponse) = sender(query, response)
+                self.assertTrue(receivedQuery)
+                self.assertTrue(receivedResponse)
+                receivedQuery.id = query.id
+                self.assertEquals(query, receivedQuery)
+                self.assertEquals(receivedResponse, response)
+
+        for key in self._responsesCounter:
+            value = self._responsesCounter[key]
+            self.assertEquals(value, numberOfQueries)
+
+    def testSkipCacheResponse(self):
+        """
+        Cache: SetSkipCacheResponseAction
+
+        dnsdist is configured to not cache entries for answer matching nocache-response.cache.tests.powerdns.com.
+         we are sending several requests and checking that the backend get them all.
+        """
+        name = 'nocache-response.cache.tests.powerdns.com.'
         numberOfQueries = 10
         query = dns.message.make_query(name, 'AAAA', 'IN')
         response = dns.message.make_response(query)
@@ -778,7 +811,7 @@ class TestTempFailureCacheTTLAction(DNSDistTest):
     _config_template = """
     pc = newPacketCache(100, {maxTTL=86400, minTTL=1})
     getPool(""):setCache(pc)
-    addAction("servfail.cache.tests.powerdns.com.", TempFailureCacheTTLAction(1))
+    addAction("servfail.cache.tests.powerdns.com.", SetTempFailureCacheTTLAction(1))
     newServer{address="127.0.0.1:%d"}
     """
 
@@ -2256,7 +2289,7 @@ class TestCachingScopeZero(DNSDistTest):
     -- we will force the ECS value added to the query if RD is set (note that we need
     -- to unset it using rules before the first cache lookup)
     addAction(RDRule(), SetECSAction("192.0.2.1/32"))
-    addAction(RDRule(), NoRecurseAction())
+    addAction(RDRule(), SetNoRecurseAction())
     """
 
     def testScopeZero(self):
@@ -2444,7 +2477,7 @@ class TestCachingScopeZeroButNoSubnetcheck(DNSDistTest):
     -- we will force the ECS value added to the query if RD is set (note that we need
     -- to unset it using rules before the first cache lookup)
     addAction(RDRule(), SetECSAction("192.0.2.1/32"))
-    addAction(RDRule(), NoRecurseAction())
+    addAction(RDRule(), SetNoRecurseAction())
     """
 
     def testScopeZero(self):

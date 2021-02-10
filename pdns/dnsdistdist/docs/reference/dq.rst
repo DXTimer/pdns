@@ -76,17 +76,22 @@ This state can be modified from the various hooks.
 
   It also supports the following methods:
 
-  .. method:: DNSQuestion:getDO() -> bool
+  .. method:: DNSQuestion:addProxyProtocolValue(type, value)
 
-    .. versionadded:: 1.2.0
+    .. versionadded:: 1.6.0
+
+    Add a proxy protocol TLV entry of type ``type`` and ``value`` to the current query.
+
+    :param int type: The type of the new value, ranging from 0 to 255 (both included)
+    :param str value: The binary-safe value
+
+  .. method:: DNSQuestion:getDO() -> bool
 
     Get the value of the DNSSEC OK bit.
 
     :returns: true if the DO bit was set, false otherwise
 
   .. method:: DNSQuestion:getEDNSOptions() -> table
-
-    .. versionadded:: 1.3.3
 
     Return the list of EDNS Options, if any.
 
@@ -132,6 +137,14 @@ This state can be modified from the various hooks.
 
     :returns: The scheme of the DoH query, for example ``http`` or ``https``
 
+  .. method:: DNSQuestion:getProxyProtocolValues() -> table
+
+    .. versionadded:: 1.6.0
+
+    Return a table of the Proxy Protocol values currently set for this query.
+
+    :returns: A table whose keys are types and values are binary-safe strings
+
   .. method:: DNSQuestion:getServerNameIndication() -> string
 
     .. versionadded:: 1.4.0
@@ -143,16 +156,12 @@ This state can be modified from the various hooks.
 
   .. method:: DNSQuestion:getTag(key) -> string
 
-    .. versionadded:: 1.2.0
-
     Get the value of a tag stored into the DNSQuestion object.
 
     :param string key: The tag's key
     :returns: The tag's value if it was set, an empty string otherwise
 
   .. method:: DNSQuestion:getTagArray() -> table
-
-    .. versionadded:: 1.2.0
 
     Get all the tags stored into the DNSQuestion object.
 
@@ -167,8 +176,6 @@ This state can be modified from the various hooks.
     :returns: The trailing data as a null-safe string
 
   .. method:: DNSQuestion:sendTrap(reason)
-
-    .. versionadded:: 1.2.0
 
     Send an SNMP trap.
 
@@ -214,16 +221,12 @@ This state can be modified from the various hooks.
 
   .. method:: DNSQuestion:setTag(key, value)
 
-    .. versionadded:: 1.2.0
-
     Set a tag into the DNSQuestion object.
 
     :param string key: The tag's key
     :param string value: The tag's value
 
   .. method:: DNSQuestion:setTagArray(tags)
-
-    .. versionadded:: 1.2.0
 
     Set an array of tags into the DNSQuestion object.
 
@@ -343,8 +346,6 @@ EDNSOptionView object
 =====================
 
 .. class:: EDNSOptionView
-
-  .. versionadded:: 1.3.3
 
   An object that represents the values of a single EDNS option received in a query.
 

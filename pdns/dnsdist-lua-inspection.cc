@@ -75,7 +75,14 @@ static std::unordered_map<unsigned int, vector<boost::variant<string,double>>> g
     else
       ret.insert({count++, {rc.second.toString(), rc.first, 100.0*rc.first/total}});
   }
-  ret.insert({count, {"Rest", rest, total > 0 ? 100.0*rest/total : 100.0}});
+
+  if (total > 0) {
+    ret.insert({count, {"Rest", rest, 100.0*rest/total}});
+  }
+  else {
+    ret.insert({count, {"Rest", rest, 100.0 }});
+  }
+
   return ret;
 }
 
@@ -302,7 +309,14 @@ void setupLuaInspection(LuaContext& luaCtx)
 	else
 	  ret.insert({count++, {rc.second.toString(), rc.first, 100.0*rc.first/total}});
       }
-      ret.insert({count, {"Rest", rest, total > 0 ? 100.0*rest/total : 100.0}});
+
+      if (total > 0) {
+        ret.insert({count, {"Rest", rest, 100.0*rest/total}});
+      }
+      else {
+        ret.insert({count, {"Rest", rest, 100.0}});
+      }
+
       return ret;
 
     });
@@ -580,7 +594,7 @@ void setupLuaInspection(LuaContext& luaCtx)
       ostringstream ret;
       boost::format fmt("%-12d %-12d %-12d %-12d");
       ret << (fmt % "Workers" % "Max Workers" % "Queued" % "Max Queued") << endl;
-      ret << (fmt % g_tcpclientthreads->getThreadsCount() % g_maxTCPClientThreads % g_tcpclientthreads->getQueuedCount() % g_maxTCPQueuedConnections) << endl;
+      ret << (fmt % g_tcpclientthreads->getThreadsCount() % (g_maxTCPClientThreads ? *g_maxTCPClientThreads : 0) % g_tcpclientthreads->getQueuedCount() % g_maxTCPQueuedConnections) << endl;
       ret << endl;
 
       ret << "Query distribution mode is: " << std::string(g_useTCPSinglePipe ? "single queue" : "per-thread queues") << endl;
@@ -656,7 +670,7 @@ void setupLuaInspection(LuaContext& luaCtx)
       boost::format flt("    %9.1f");
       for(const auto& e : entries) {
 	string second;
-	if(const auto& val = boost::get<DNSDistStats::stat_t*>(&e.second))
+	if(const auto& val = boost::get<pdns::stat_t*>(&e.second))
 	  second=std::to_string((*val)->load());
 	else if (const auto& dval = boost::get<double*>(&e.second))
 	  second=(flt % (**dval)).str();
@@ -772,21 +786,27 @@ void setupLuaInspection(LuaContext& luaCtx)
         group->setQTypeRate(qtype, rate, warningRate ? *warningRate : 0, seconds, reason, blockDuration, action ? *action : DNSAction::Action::None);
       }
     });
-  luaCtx.registerFunction<void(std::shared_ptr<DynBlockRulesGroup>::*)(boost::variant<std::string, std::vector<std::pair<int, std::string>>>)>("excludeRange", [](std::shared_ptr<DynBlockRulesGroup>& group, boost::variant<std::string, std::vector<std::pair<int, std::string>>> ranges) {
+  luaCtx.registerFunction<void(std::shared_ptr<DynBlockRulesGroup>::*)(boost::variant<std::string, std::vector<std::pair<int, std::string>>, NetmaskGroup>)>("excludeRange", [](std::shared_ptr<DynBlockRulesGroup>& group, boost::variant<std::string, std::vector<std::pair<int, std::string>>, NetmaskGroup> ranges) {
       if (ranges.type() == typeid(std::vector<std::pair<int, std::string>>)) {
         for (const auto& range : *boost::get<std::vector<std::pair<int, std::string>>>(&ranges)) {
           group->excludeRange(Netmask(range.second));
         }
       }
+      else if (ranges.type() == typeid(NetmaskGroup)) {
+        group->excludeRange(*boost::get<NetmaskGroup>(&ranges));
+      }
       else {
         group->excludeRange(Netmask(*boost::get<std::string>(&ranges)));
       }
     });
-  luaCtx.registerFunction<void(std::shared_ptr<DynBlockRulesGroup>::*)(boost::variant<std::string, std::vector<std::pair<int, std::string>>>)>("includeRange", [](std::shared_ptr<DynBlockRulesGroup>& group, boost::variant<std::string, std::vector<std::pair<int, std::string>>> ranges) {
+  luaCtx.registerFunction<void(std::shared_ptr<DynBlockRulesGroup>::*)(boost::variant<std::string, std::vector<std::pair<int, std::string>>, NetmaskGroup>)>("includeRange", [](std::shared_ptr<DynBlockRulesGroup>& group, boost::variant<std::string, std::vector<std::pair<int, std::string>>, NetmaskGroup> ranges) {
       if (ranges.type() == typeid(std::vector<std::pair<int, std::string>>)) {
         for (const auto& range : *boost::get<std::vector<std::pair<int, std::string>>>(&ranges)) {
           group->includeRange(Netmask(range.second));
         }
+      }
+      else if (ranges.type() == typeid(NetmaskGroup)) {
+        group->includeRange(*boost::get<NetmaskGroup>(&ranges));
       }
       else {
         group->includeRange(Netmask(*boost::get<std::string>(&ranges)));

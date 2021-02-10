@@ -8,7 +8,8 @@ Introduction
 The PowerDNS Recursor is a high-performance DNS recursor with built-in scripting capabilities.
 It is known to power the resolving needs of over 150 million internet connections.
 
-The documentation is only for the 4.1 series, users of older versions are urged to upgrade!
+The documentation is only for the 4.1 and higher series, users of
+older versions are urged to read :ref:`eol` and upgrade!
 
 This documentation is also available as a `PDF document <PowerDNS-Recursor.pdf>`_.
 
@@ -41,8 +42,8 @@ Public support is available via several different channels:
 The Open-Xchange/PowerDNS company can provide help or support you in private as well.
 Please `contact Open-Xchange <https://www.open-xchange.com/about-ox/contact-us/>`__.
 
-My information is confidential, must I send it to the mailing list or discuss on IRC?
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+My information is confidential, must I send it to the mailing list, discuss it on IRC, or post it in a GitHub ticket?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Yes, we have a support policy called `"Open Source Support: out in the open" <https://blog.powerdns.com/2016/01/18/open-source-support-out-in-the-open/>`_.
 
 If you desire privacy, please consider entering a support relationship with us, in which case we invite you to `contact Open-Xchange <https://www.open-xchange.com/about-ox/contact-us/>`__.

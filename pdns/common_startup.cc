@@ -169,7 +169,7 @@ void declareArguments()
 
   ::arg().set("carbon-namespace", "If set overwrites the first part of the carbon string")="pdns";
   ::arg().set("carbon-ourname", "If set, overrides our reported hostname for carbon stats")="";
-  ::arg().set("carbon-instance", "If set overwrites the the instance name default")="auth";
+  ::arg().set("carbon-instance", "If set overwrites the instance name default")="auth";
   ::arg().set("carbon-server", "If set, send metrics in carbon (graphite) format to this server IP address")="";
   ::arg().set("carbon-interval", "Number of seconds between carbon (graphite) updates")="30";
 
@@ -248,10 +248,10 @@ void declareArguments()
   ::arg().setDefaults();
 }
 
-static time_t s_start=time(0);
+static time_t s_start=time(nullptr);
 static uint64_t uptimeOfProcess(const std::string& str)
 {
-  return time(0) - s_start;
+  return time(nullptr) - s_start;
 }
 
 static uint64_t getSysUserTimeMsec(const std::string& str)
@@ -299,7 +299,7 @@ static uint64_t getLatency(const std::string& str)
   return round(avg_latency);
 }
 
-void declareStats(void)
+void declareStats()
 {
   S.declare("udp-queries","Number of UDP queries received");
   S.declare("udp-do-queries","Number of UDP queries received with DO bit");

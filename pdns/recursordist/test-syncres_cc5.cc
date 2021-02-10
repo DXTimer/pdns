@@ -107,6 +107,132 @@ BOOST_AUTO_TEST_CASE(test_dnssec_secure_various_algos)
   BOOST_CHECK_EQUAL(queriesCount, 8U);
 }
 
+static void testFixedPointInTime(time_t fixedNow)
+{
+  std::unique_ptr<SyncRes> sr;
+  initSR(sr, true, false, fixedNow);
+
+  setDNSSECValidation(sr, DNSSECMode::ValidateAll);
+
+  primeHints(fixedNow);
+  const DNSName target("powerdns.com.");
+  const ComboAddress targetAddr("192.0.2.42");
+  testkeysset_t keys;
+
+  auto luaconfsCopy = g_luaconfs.getCopy();
+  luaconfsCopy.dsAnchors.clear();
+  generateKeyMaterial(g_rootdnsname, DNSSECKeeper::RSASHA512, DNSSECKeeper::DIGEST_SHA384, keys, luaconfsCopy.dsAnchors);
+  generateKeyMaterial(DNSName("com."), DNSSECKeeper::ECDSA256, DNSSECKeeper::DIGEST_SHA256, keys);
+  generateKeyMaterial(DNSName("powerdns.com."), DNSSECKeeper::ECDSA384, DNSSECKeeper::DIGEST_SHA384, keys);
+
+  g_luaconfs.setState(luaconfsCopy);
+
+  size_t queriesCount = 0;
+
+  sr->setAsyncCallback([target, targetAddr, &queriesCount, keys, fixedNow](const ComboAddress& ip, const DNSName& domain, int type, bool doTCP, bool sendRDQuery, int EDNS0Level, struct timeval* now, boost::optional<Netmask>& srcmask, boost::optional<const ResolveContext&> context, LWResult* res, bool* chained) {
+    queriesCount++;
+
+    DNSName auth = domain;
+    if (domain == target) {
+      auth = DNSName("powerdns.com.");
+    }
+
+    if (type == QType::DS || type == QType::DNSKEY) {
+      return genericDSAndDNSKEYHandler(res, domain, auth, type, keys, true, fixedNow);
+    }
+
+    if (isRootServer(ip)) {
+      setLWResult(res, 0, false, false, true);
+      addRecordToLW(res, "com.", QType::NS, "a.gtld-servers.com.", DNSResourceRecord::AUTHORITY, 3600);
+      addDS(DNSName("com."), 300, res->d_records, keys);
+      addRRSIG(keys, res->d_records, DNSName("."), 300, false, boost::none, boost::none, fixedNow);
+      addRecordToLW(res, "a.gtld-servers.com.", QType::A, "192.0.2.1", DNSResourceRecord::ADDITIONAL, 3600);
+      return LWResult::Result::Success;
+    }
+
+    if (ip == ComboAddress("192.0.2.1:53")) {
+      if (domain == DNSName("com.")) {
+        setLWResult(res, 0, true, false, true);
+        addRecordToLW(res, domain, QType::NS, "a.gtld-servers.com.");
+        addRRSIG(keys, res->d_records, domain, 300, false, boost::none, boost::none, fixedNow);
+        addRecordToLW(res, "a.gtld-servers.com.", QType::A, "192.0.2.1", DNSResourceRecord::ADDITIONAL, 3600);
+        addRRSIG(keys, res->d_records, domain, 300, false, boost::none, boost::none, fixedNow);
+      }
+      else {
+        setLWResult(res, 0, false, false, true);
+        addRecordToLW(res, auth, QType::NS, "ns1.powerdns.com.", DNSResourceRecord::AUTHORITY, 3600);
+        addDS(auth, 300, res->d_records, keys);
+        addRRSIG(keys, res->d_records, DNSName("com."), 300, false, boost::none, boost::none, fixedNow);
+        addRecordToLW(res, "ns1.powerdns.com.", QType::A, "192.0.2.2", DNSResourceRecord::ADDITIONAL, 3600);
+      }
+      return LWResult::Result::Success;
+    }
+
+    if (ip == ComboAddress("192.0.2.2:53")) {
+      if (type == QType::NS) {
+        setLWResult(res, 0, true, false, true);
+        addRecordToLW(res, domain, QType::NS, "ns1.powerdns.com.");
+        addRRSIG(keys, res->d_records, auth, 300, false, boost::none, boost::none, fixedNow);
+        addRecordToLW(res, "ns1.powerdns.com.", QType::A, "192.0.2.2", DNSResourceRecord::ADDITIONAL, 3600);
+        addRRSIG(keys, res->d_records, auth, 300, false, boost::none, boost::none, fixedNow);
+      }
+      else {
+        setLWResult(res, RCode::NoError, true, false, true);
+        addRecordToLW(res, domain, QType::A, targetAddr.toString(), DNSResourceRecord::ANSWER, 3600);
+        addRRSIG(keys, res->d_records, auth, 300, false, boost::none, boost::none, fixedNow);
+      }
+      return LWResult::Result::Success;
+    }
+
+    return LWResult::Result::Timeout;
+  });
+
+  vector<DNSRecord> ret;
+  int res = sr->beginResolve(target, QType(QType::A), QClass::IN, ret);
+  BOOST_CHECK_EQUAL(res, RCode::NoError);
+  BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
+  BOOST_REQUIRE_EQUAL(ret.size(), 2U);
+  BOOST_CHECK_EQUAL(queriesCount, 8U);
+  /* again, to test the cache */
+  ret.clear();
+  res = sr->beginResolve(target, QType(QType::A), QClass::IN, ret);
+  BOOST_CHECK_EQUAL(res, RCode::NoError);
+  BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
+  BOOST_REQUIRE_EQUAL(ret.size(), 2U);
+  BOOST_CHECK_EQUAL(queriesCount, 8U);
+}
+
+BOOST_AUTO_TEST_CASE(test_dnssec_secure_various_algos1970)
+{
+  /* validity period in ye olde times */
+  const time_t fixedNow = 1800;
+  testFixedPointInTime(fixedNow);
+}
+
+BOOST_AUTO_TEST_CASE(test_dnssec_secure_various_algos2038)
+{
+  /* validity period contains the wrapping point in 2038 */
+  const time_t fixedNow = INT_MAX - 1800;
+  testFixedPointInTime(fixedNow);
+}
+
+BOOST_AUTO_TEST_CASE(test_dnssec_secure_various_algos2041)
+{
+  /* validity period completely after 2038 but not wrapping uint32_t*/
+  const time_t fixedNow = time_t(INT_MAX) + 100000000;
+  testFixedPointInTime(fixedNow);
+}
+
+#if 0
+// Currently fails see validate.cc:isRRSIGNotExpired() and isRRSIGIncepted()
+BOOST_AUTO_TEST_CASE(test_dnssec_secure_various_algos2106)
+{
+  /* validity period beyond 2106 uint32_t wrapping point */
+  const time_t fixedNow = 2 * time_t(INT_MAX);
+  testFixedPointInTime(fixedNow);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(test_dnssec_secure_a_then_ns)
 {
   std::unique_ptr<SyncRes> sr;
@@ -788,10 +914,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec_wildcard)
           }
         }
         else {
-          addRecordToLW(res, domain, QType::A, "192.0.2.42");
+          addRecordToLW(res, domain, QType::A, "192.0.2.42", DNSResourceRecord::ANSWER, 600);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com"), 300, false, boost::none, DNSName("*.powerdns.com"));
           /* we need to add the proof that this name does not exist, so the wildcard may apply */
-          addNSECRecordToLW(DNSName("a.powerdns.com."), DNSName("wwz.powerdns.com."), {QType::A, QType::NSEC, QType::RRSIG}, 600, res->d_records);
+          addNSECRecordToLW(DNSName("a.powerdns.com."), DNSName("wwz.powerdns.com."), {QType::A, QType::NSEC, QType::RRSIG}, 60, res->d_records);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com"), 300);
         }
         return LWResult::Result::Success;
@@ -814,6 +940,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec_wildcard)
   BOOST_CHECK_EQUAL(res, RCode::NoError);
   BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
   BOOST_REQUIRE_EQUAL(ret.size(), 4U);
+  for (const auto& rec : ret) {
+    /* check that we applied the lowest TTL, here this is from the NSEC proving that the exact name did not exist */
+    BOOST_CHECK_LE(rec.d_ttl, 60U);
+  }
   BOOST_CHECK_EQUAL(queriesCount, 9U);
 }
 
@@ -903,10 +1033,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec_wildcard_proof_before_rrsig)
           }
         }
         else {
-          addRecordToLW(res, domain, QType::A, "192.0.2.42");
+          addRecordToLW(res, domain, QType::A, "192.0.2.42", DNSResourceRecord::ANSWER, 600);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com"), 300, false, boost::none, DNSName("*.powerdns.com"));
           /* we need to add the proof that this name does not exist, so the wildcard may apply */
-          addNSECRecordToLW(DNSName("a.powerdns.com."), DNSName("wwz.powerdns.com."), {QType::A, QType::NSEC, QType::RRSIG}, 600, res->d_records);
+          addNSECRecordToLW(DNSName("a.powerdns.com."), DNSName("wwz.powerdns.com."), {QType::A, QType::NSEC, QType::RRSIG}, 60, res->d_records);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com"), 300);
           /* now this is the important part! We are swapping the first RRSIG and the NSEC, to make sure we still gather the NSEC proof that the
              exact name does not exist even though we have not seen the RRSIG whose label count is smaller than the target name yet */
@@ -932,6 +1062,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec_wildcard_proof_before_rrsig)
   BOOST_CHECK_EQUAL(res, RCode::NoError);
   BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
   BOOST_REQUIRE_EQUAL(ret.size(), 4U);
+  for (const auto& rec : ret) {
+    /* check that we applied the lowest TTL, here this is from the NSEC proving that the exact name did not exist */
+    BOOST_CHECK_LE(rec.d_ttl, 60U);
+  }
   BOOST_CHECK_EQUAL(queriesCount, 9U);
 }
 
@@ -1378,14 +1512,14 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec3_wildcard)
           }
         }
         else {
-          addRecordToLW(res, domain, QType::A, "192.0.2.42");
+          addRecordToLW(res, domain, QType::A, "192.0.2.42", DNSResourceRecord::ANSWER, 600);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com"), 300, false, boost::none, DNSName("*.powerdns.com"));
           /* we need to add the proof that this name does not exist, so the wildcard may apply */
           /* first the closest encloser */
           addNSEC3UnhashedRecordToLW(DNSName("powerdns.com."), DNSName("powerdns.com."), "whatever", {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, res->d_records);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com."), 300);
           /* then the next closer */
-          addNSEC3NarrowRecordToLW(DNSName("sub.powerdns.com."), DNSName("powerdns.com."), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 600, res->d_records);
+          addNSEC3NarrowRecordToLW(DNSName("sub.powerdns.com."), DNSName("powerdns.com."), {QType::A, QType::TXT, QType::RRSIG, QType::NSEC}, 60, res->d_records);
           addRRSIG(keys, res->d_records, DNSName("powerdns.com."), 300);
         }
         return LWResult::Result::Success;
@@ -1408,6 +1542,10 @@ BOOST_AUTO_TEST_CASE(test_dnssec_validation_nsec3_wildcard)
   BOOST_CHECK_EQUAL(res, RCode::NoError);
   BOOST_CHECK_EQUAL(sr->getValidationState(), vState::Secure);
   BOOST_REQUIRE_EQUAL(ret.size(), 6U);
+  for (const auto& rec : ret) {
+    /* check that we applied the lowest TTL, here this is from the NSEC3 proving that the exact name did not exist (next closer) */
+    BOOST_CHECK_LE(rec.d_ttl, 60U);
+  }
   BOOST_CHECK_EQUAL(queriesCount, 10U);
 }
 

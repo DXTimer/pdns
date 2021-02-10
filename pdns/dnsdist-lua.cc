@@ -40,6 +40,7 @@
 #ifdef LUAJIT_VERSION
 #include "dnsdist-lua-ffi.hh"
 #endif /* LUAJIT_VERSION */
+#include "dnsdist-proxy-protocol.hh"
 #include "dnsdist-rings.hh"
 #include "dnsdist-secpoll.hh"
 #include "dnsdist-web.hh"
@@ -48,7 +49,6 @@
 #include "dnswriter.hh"
 #include "dolog.hh"
 #include "lock.hh"
-#include "protobuf.hh"
 #include "sodcrypto.hh"
 
 #ifdef HAVE_LIBSSL
@@ -722,9 +722,6 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         frontend->cleanup();
       }
       g_tlslocals.clear();
-#ifdef HAVE_PROTOBUF
-      google::protobuf::ShutdownProtobufLibrary();
-#endif /* HAVE_PROTOBUF */
 #endif /* 0 */
       _exit(0);
   } );
@@ -844,7 +841,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       g_carbon.setState(ours);
   });
 
-  luaCtx.writeFunction("webserver", [client,configCheck](const std::string& address, const std::string& password, const boost::optional<std::string> apiKey, const boost::optional<std::map<std::string, std::string> > customHeaders, const boost::optional<std::string> acl) {
+  luaCtx.writeFunction("webserver", [client,configCheck](const std::string& address, const boost::optional<std::string> password, const boost::optional<std::string> apiKey, const boost::optional<std::map<std::string, std::string> > customHeaders, const boost::optional<std::string> acl) {
       setLuaSideEffect();
       ComboAddress local;
       try {
@@ -858,36 +855,49 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         return;
       }
 
+      if (password || apiKey || customHeaders || acl) {
+        warnlog("Passing additional parameters to 'webserver()' is deprecated, please use 'setWebserverConfig()' instead.");
+      }
+
       try {
-	int sock = SSocket(local.sin4.sin_family, SOCK_STREAM, 0);
-	SSetsockopt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
-	SBind(sock, local);
-	SListen(sock, 5);
-	auto launch=[sock, local, password, apiKey, customHeaders, acl]() {
-          setWebserverPassword(password);
-          setWebserverAPIKey(apiKey);
-          setWebserverCustomHeaders(customHeaders);
+        int sock = SSocket(local.sin4.sin_family, SOCK_STREAM, 0);
+        SSetsockopt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
+        SBind(sock, local);
+        SListen(sock, 5);
+        auto launch=[sock, local, password, apiKey, customHeaders, acl]() {
+          if (password) {
+            setWebserverPassword(*password);
+          }
+
+          if (apiKey) {
+            setWebserverAPIKey(apiKey);
+          }
+
+          if (customHeaders) {
+            setWebserverCustomHeaders(customHeaders);
+          }
+
           if (acl) {
             setWebserverACL(*acl);
           }
           thread t(dnsdistWebserverThread, sock, local);
-	  t.detach();
-	};
-	if (g_launchWork) {
-	  g_launchWork->push_back(launch);
+          t.detach();
+        };
+        if (g_launchWork) {
+          g_launchWork->push_back(launch);
         }
-	else {
-	  launch();
+        else {
+          launch();
         }
       }
-      catch(std::exception& e) {
-	g_outputBuffer="Unable to bind to webserver socket on " + local.toStringWithPort() + ": " + e.what();
-	errlog("Unable to bind to webserver socket on %s: %s", local.toStringWithPort(), e.what());
+      catch (const std::exception& e) {
+        g_outputBuffer="Unable to bind to webserver socket on " + local.toStringWithPort() + ": " + e.what();
+        errlog("Unable to bind to webserver socket on %s: %s", local.toStringWithPort(), e.what());
       }
 
     });
 
-  typedef std::unordered_map<std::string, boost::variant<std::string, std::map<std::string, std::string>> > webserveropts_t;
+  typedef std::unordered_map<std::string, boost::variant<bool, std::string, std::map<std::string, std::string>> > webserveropts_t;
 
   luaCtx.writeFunction("setWebserverConfig", [](boost::optional<webserveropts_t> vars) {
       setLuaSideEffect();
@@ -895,25 +905,37 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       if (!vars) {
         return ;
       }
-      if(vars->count("password")) {
+
+      if (vars->count("password")) {
         const std::string password = boost::get<std::string>(vars->at("password"));
 
         setWebserverPassword(password);
       }
-      if(vars->count("apiKey")) {
+
+      if (vars->count("apiKey")) {
         const std::string apiKey = boost::get<std::string>(vars->at("apiKey"));
 
         setWebserverAPIKey(apiKey);
       }
+
       if (vars->count("acl")) {
         const std::string acl = boost::get<std::string>(vars->at("acl"));
 
         setWebserverACL(acl);
       }
-      if(vars->count("customHeaders")) {
+
+      if (vars->count("customHeaders")) {
         const boost::optional<std::map<std::string, std::string> > headers = boost::get<std::map<std::string, std::string> >(vars->at("customHeaders"));
 
         setWebserverCustomHeaders(headers);
+      }
+
+      if (vars->count("statsRequireAuthentication")) {
+        setWebserverStatsRequireAuthentication(boost::get<bool>(vars->at("statsRequireAuthentication")));
+      }
+
+      if (vars->count("maxConcurrentConnections")) {
+        setWebserverMaxConcurrentConnections(std::stoi(boost::get<std::string>(vars->at("maxConcurrentConnections"))));
       }
     });
 
@@ -995,6 +1017,11 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
         g_outputBuffer += s + "\n";
       }
     });
+
+  luaCtx.writeFunction("setConsoleMaximumConcurrentConnections", [](size_t max) {
+      setLuaSideEffect();
+      setConsoleMaximumConcurrentConnections(max);
+  });
 
   luaCtx.writeFunction("clearQueryCounters", []() {
       unsigned int size{0};
@@ -1163,8 +1190,6 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
   luaCtx.writeFunction("setECSOverride", [](bool override) { g_ECSOverride=override; });
 
-  luaCtx.writeFunction("setPreserveTrailingData", [](bool preserve) { g_preserveTrailingData = preserve; });
-
   luaCtx.writeFunction("showDynBlocks", []() {
       setLuaNoSideEffect();
       auto slow = g_dynblockNMG.getCopy();
@@ -1174,7 +1199,11 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       g_outputBuffer = (fmt % "What" % "Seconds" % "Blocks" % "Warning" % "Action" % "Reason").str();
       for(const auto& e: slow) {
         if (now < e.second.until) {
-          g_outputBuffer+= (fmt % e.first.toString() % (e.second.until.tv_sec - now.tv_sec) % e.second.blocks % (e.second.warning ? "true" : "false") % DNSAction::typeToString(e.second.action != DNSAction::Action::None ? e.second.action : g_dynBlockAction) % e.second.reason).str();
+          uint64_t counter = e.second.blocks;
+          if (g_defaultBPFFilter && e.second.bpf) {
+            counter += g_defaultBPFFilter->getHits(e.first.getNetwork());
+          }
+          g_outputBuffer+= (fmt % e.first.toString() % (e.second.until.tv_sec - now.tv_sec) % counter % (e.second.warning ? "true" : "false") % DNSAction::typeToString(e.second.action != DNSAction::Action::None ? e.second.action : g_dynBlockAction) % e.second.reason).str();
         }
       }
       auto slow2 = g_dynblockSMT.getCopy();
@@ -1632,7 +1661,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       setLuaNoSideEffect();
       std::unordered_map<string,uint64_t> res;
       for(const auto& entry : g_stats.entries) {
-        if(const auto& val = boost::get<DNSDistStats::stat_t*>(&entry.second))
+        if(const auto& val = boost::get<pdns::stat_t*>(&entry.second))
           res[entry.first] = (*val)->load();
       }
       return res;
@@ -1785,7 +1814,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       g_useTCPSinglePipe = flag;
     });
 
-  luaCtx.writeFunction("snmpAgent", [client,configCheck](bool enableTraps, boost::optional<std::string> masterSocket) {
+  luaCtx.writeFunction("snmpAgent", [client,configCheck](bool enableTraps, boost::optional<std::string> daemonSocket) {
       if(client || configCheck)
         return;
 #ifdef HAVE_NET_SNMP
@@ -1803,7 +1832,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
       g_snmpEnabled = true;
       g_snmpTrapsEnabled = enableTraps;
-      g_snmpAgent = new DNSDistSNMPAgent("dnsdist", masterSocket ? *masterSocket : std::string());
+      g_snmpAgent = new DNSDistSNMPAgent("dnsdist", daemonSocket ? *daemonSocket : std::string());
 #else
       errlog("NET SNMP support is required to use snmpAgent()");
       g_outputBuffer="NET SNMP support is required to use snmpAgent()\n";
@@ -1895,6 +1924,45 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       g_consoleOutputMsgMaxSize = size;
     });
 
+  luaCtx.writeFunction("setProxyProtocolACL", [](boost::variant<string,vector<pair<int, string>>> inp) {
+    if (g_configurationDone) {
+      errlog("setProxyProtocolACL() cannot be used at runtime!");
+      g_outputBuffer="setProxyProtocolACL() cannot be used at runtime!\n";
+      return;
+    }
+    setLuaSideEffect();
+    NetmaskGroup nmg;
+    if (auto str = boost::get<string>(&inp)) {
+      nmg.addMask(*str);
+    }
+    else {
+      for(const auto& p : boost::get<vector<pair<int,string>>>(inp)) {
+	nmg.addMask(p.second);
+      }
+    }
+    g_proxyProtocolACL = std::move(nmg);
+  });
+
+  luaCtx.writeFunction("setProxyProtocolApplyACLToProxiedClients", [](bool apply) {
+    if (g_configurationDone) {
+      errlog("setProxyProtocolApplyACLToProxiedClients() cannot be used at runtime!");
+      g_outputBuffer="setProxyProtocolApplyACLToProxiedClients() cannot be used at runtime!\n";
+      return;
+    }
+    setLuaSideEffect();
+    g_applyACLToProxiedClients = apply;
+  });
+
+  luaCtx.writeFunction("setProxyProtocolMaximumPayloadSize", [](size_t size) {
+    if (g_configurationDone) {
+      errlog("setProxyProtocolMaximumPayloadSize() cannot be used at runtime!");
+      g_outputBuffer="setProxyProtocolMaximumPayloadSize() cannot be used at runtime!\n";
+      return;
+    }
+    setLuaSideEffect();
+    g_proxyProtocolMaximumSize = std::max(static_cast<size_t>(16), size);
+  });
+
   luaCtx.writeFunction("setUDPMultipleMessagesVectorSize", [](size_t vSize) {
       if (g_configurationDone) {
         errlog("setUDPMultipleMessagesVectorSize() cannot be used at runtime!");
@@ -1946,13 +2014,69 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       g_secPollInterval = newInterval;
   });
 
-  luaCtx.writeFunction("setSyslogFacility", [](int facility) {
+  luaCtx.writeFunction("setSyslogFacility", [](boost::variant<int,std::string> facility) {
     setLuaSideEffect();
     if (g_configurationDone) {
       g_outputBuffer="setSyslogFacility cannot be used at runtime!\n";
       return;
     }
-    setSyslogFacility(facility);
+    if (facility.type() == typeid(std::string)) {
+      static std::map<std::string, int> const facilities = {
+        { "local0", LOG_LOCAL0 },
+        { "log_local0", LOG_LOCAL0 },
+        { "local1", LOG_LOCAL1 },
+        { "log_local1", LOG_LOCAL1 },
+        { "local2", LOG_LOCAL2 },
+        { "log_local2", LOG_LOCAL2 },
+        { "local3", LOG_LOCAL3 },
+        { "log_local3", LOG_LOCAL3 },
+        { "local4", LOG_LOCAL4 },
+        { "log_local4", LOG_LOCAL4 },
+        { "local5", LOG_LOCAL5 },
+        { "log_local5", LOG_LOCAL5 },
+        { "local6", LOG_LOCAL6 },
+        { "log_local6", LOG_LOCAL6 },
+        { "local7", LOG_LOCAL7 },
+        { "log_local7", LOG_LOCAL7 },
+        /* most of these likely make very little sense
+           for dnsdist, but why not? */
+        { "kern", LOG_KERN },
+        { "log_kern", LOG_KERN },
+        { "user", LOG_USER },
+        { "log_user", LOG_USER },
+        { "mail", LOG_MAIL },
+        { "log_mail", LOG_MAIL },
+        { "daemon", LOG_DAEMON },
+        { "log_daemon", LOG_DAEMON },
+        { "auth", LOG_AUTH },
+        { "log_auth", LOG_AUTH },
+        { "syslog", LOG_SYSLOG },
+        { "log_syslog", LOG_SYSLOG },
+        { "lpr", LOG_LPR },
+        { "log_lpr", LOG_LPR },
+        { "news", LOG_NEWS },
+        { "log_news", LOG_NEWS },
+        { "uucp", LOG_UUCP },
+        { "log_uucp", LOG_UUCP },
+        { "cron", LOG_CRON },
+        { "log_cron", LOG_CRON },
+        { "authpriv", LOG_AUTHPRIV },
+        { "log_authpriv", LOG_AUTHPRIV },
+        { "ftp", LOG_FTP },
+        { "log_ftp", LOG_FTP }
+      };
+      auto facilityStr = boost::get<std::string>(facility);
+      toLowerInPlace(facilityStr);
+      auto it = facilities.find(facilityStr);
+      if (it == facilities.end()) {
+        g_outputBuffer="Unknown facility '" + facilityStr + "' passed to setSyslogFacility()!\n";
+        return;
+      }
+      setSyslogFacility(it->second);
+    }
+    else {
+      setSyslogFacility(boost::get<int>(facility));
+    }
   });
 
   luaCtx.writeFunction("addDOHLocal", [client](const std::string& addr, boost::optional<boost::variant<std::string, std::vector<std::pair<int,std::string>>>> certFiles, boost::optional<boost::variant<std::string, std::vector<std::pair<int,std::string>>>> keyFiles, boost::optional<boost::variant<std::string, vector<pair<int, std::string> > > > urls, boost::optional<localbind_t> vars) {
@@ -2029,6 +2153,10 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
       if (vars->count("internalPipeBufferSize")) {
         frontend->d_internalPipeBufferSize = boost::get<int>((*vars)["internalPipeBufferSize"]);
+      }
+
+      if (vars->count("exactPathMatching")) {
+        frontend->d_exactPathMatching = boost::get<bool>((*vars)["exactPathMatching"]);
       }
 
       parseTLSConfig(frontend->d_tlsConfig, "addDOHLocal", vars);
@@ -2154,11 +2282,11 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
 
     luaCtx.registerFunction<void(std::shared_ptr<DOHFrontend>::*)(const std::map<int, std::shared_ptr<DOHResponseMapEntry>>&)>("setResponsesMap", [](std::shared_ptr<DOHFrontend> frontend, const std::map<int, std::shared_ptr<DOHResponseMapEntry>>& map) {
         if (frontend != nullptr) {
-          std::vector<std::shared_ptr<DOHResponseMapEntry>> newMap;
-          newMap.reserve(map.size());
+          auto newMap = std::make_shared<std::vector<std::shared_ptr<DOHResponseMapEntry>>>();
+          newMap->reserve(map.size());
 
           for (const auto& entry : map) {
-            newMap.push_back(entry.second);
+            newMap->push_back(entry.second);
           }
 
           frontend->d_responsesMap = std::move(newMap);
@@ -2356,6 +2484,7 @@ static void setupLuaConfig(LuaContext& luaCtx, bool client, bool configCheck)
       });
 
     luaCtx.writeFunction("setAllowEmptyResponse", [](bool allow) { g_allowEmptyResponse=allow; });
+    luaCtx.writeFunction("setDropEmptyQueries", [](bool drop) { extern bool g_dropEmptyQueries; g_dropEmptyQueries = drop; });
 
 #if defined(HAVE_LIBSSL) && defined(HAVE_OCSP_BASIC_SIGN)
     luaCtx.writeFunction("generateOCSPResponse", [client](const std::string& certFile, const std::string& caCert, const std::string& caKey, const std::string& outFile, int ndays, int nmin) {

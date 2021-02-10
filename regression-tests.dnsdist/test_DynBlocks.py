@@ -560,14 +560,15 @@ class TestDynBlockQPS(DynBlocksTest):
     _dynBlockQPS = 10
     _dynBlockPeriod = 2
     _dynBlockDuration = 5
-    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
     _config_template = """
     function maintenance()
 	    addDynBlocks(exceedQRate(%d, %d), "Exceeded query rate", %d)
     end
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
+    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
 
     def testDynBlocksQRate(self):
         """
@@ -581,7 +582,6 @@ class TestDynBlockGroupQPS(DynBlocksTest):
     _dynBlockQPS = 10
     _dynBlockPeriod = 2
     _dynBlockDuration = 5
-    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
     _config_template = """
     local dbr = dynBlockRulesGroup()
     dbr:setQueryRate(%d, %d, "Exceeded query rate", %d)
@@ -590,8 +590,10 @@ class TestDynBlockGroupQPS(DynBlocksTest):
 	    dbr:apply()
     end
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
+    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
 
     def testDynBlocksQRate(self):
         """
@@ -820,19 +822,19 @@ class TestDynBlockServFails(DynBlocksTest):
         name = 'servfailrate.dynblocks.tests.powerdns.com.'
         self.doTestRCodeRate(name, dns.rcode.SERVFAIL)
 
-class TestDynBlockWhitelist(DynBlocksTest):
+class TestDynBlockAllowlist(DynBlocksTest):
 
     _dynBlockQPS = 10
     _dynBlockPeriod = 2
     _dynBlockDuration = 5
     _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort']
     _config_template = """
-    whitelisted = false
+    allowlisted = false
     function maintenance()
         toBlock = exceedQRate(%d, %d)
         for addr, count in pairs(toBlock) do
             if addr:toString() == "127.0.0.1" then
-                whitelisted = true
+                allowlisted = true
                 toBlock[addr] = nil
             end
         end
@@ -840,23 +842,23 @@ class TestDynBlockWhitelist(DynBlocksTest):
     end
 
     function spoofrule(dq)
-        if (whitelisted)
+        if (allowlisted)
         then
                 return DNSAction.Spoof, "192.0.2.42"
         else
                 return DNSAction.None, ""
         end
     end
-    addAction("whitelisted-test.dynblocks.tests.powerdns.com.", LuaAction(spoofrule))
+    addAction("allowlisted-test.dynblocks.tests.powerdns.com.", LuaAction(spoofrule))
 
     newServer{address="127.0.0.1:%s"}
     """
 
-    def testWhitelisted(self):
+    def testAllowlisted(self):
         """
-        Dyn Blocks: Whitelisted from the dynamic blocks
+        Dyn Blocks: Allowlisted from the dynamic blocks
         """
-        name = 'whitelisted.dynblocks.tests.powerdns.com.'
+        name = 'allowlisted.dynblocks.tests.powerdns.com.'
         query = dns.message.make_query(name, 'A', 'IN')
         response = dns.message.make_response(query)
         rrset = dns.rrset.from_text(name,
@@ -893,8 +895,8 @@ class TestDynBlockWhitelist(DynBlocksTest):
         self.assertEquals(query, receivedQuery)
         self.assertEquals(receivedResponse, receivedResponse)
 
-        # check that we would have been blocked without the whitelisting
-        name = 'whitelisted-test.dynblocks.tests.powerdns.com.'
+        # check that we would have been blocked without the allowlisting
+        name = 'allowlisted-test.dynblocks.tests.powerdns.com.'
         query = dns.message.make_query(name, 'A', 'IN')
         # dnsdist set RA = RD for spoofed responses
         query.flags &= ~dns.flags.RD
@@ -1068,12 +1070,73 @@ class TestDynBlockGroupExcluded(DynBlocksTest):
         self.assertEquals(query, receivedQuery)
         self.assertEquals(receivedResponse, receivedResponse)
 
+class TestDynBlockGroupExcludedViaNMG(DynBlocksTest):
+
+    _dynBlockQPS = 10
+    _dynBlockPeriod = 2
+    _dynBlockDuration = 5
+    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort']
+    _config_template = """
+    local nmg = newNMG()
+    nmg:addMask("127.0.0.1/32")
+
+    local dbr = dynBlockRulesGroup()
+    dbr:setQueryRate(%d, %d, "Exceeded query rate", %d)
+    dbr:excludeRange(nmg)
+
+    function maintenance()
+	    dbr:apply()
+    end
+
+    newServer{address="127.0.0.1:%s"}
+    """
+
+    def testExcluded(self):
+        """
+        Dyn Blocks (group) : Excluded (via NMG) from the dynamic block rules
+        """
+        name = 'excluded-nmg.group.dynblocks.tests.powerdns.com.'
+        query = dns.message.make_query(name, 'A', 'IN')
+        response = dns.message.make_response(query)
+        rrset = dns.rrset.from_text(name,
+                                    60,
+                                    dns.rdataclass.IN,
+                                    dns.rdatatype.A,
+                                    '192.0.2.1')
+        response.answer.append(rrset)
+
+        allowed = 0
+        sent = 0
+        for _ in range((self._dynBlockQPS * self._dynBlockPeriod) + 1):
+            (receivedQuery, receivedResponse) = self.sendUDPQuery(query, response)
+            sent = sent + 1
+            if receivedQuery:
+                receivedQuery.id = query.id
+                self.assertEquals(query, receivedQuery)
+                self.assertEquals(response, receivedResponse)
+                allowed = allowed + 1
+            else:
+                # the query has not reached the responder,
+                # let's clear the response queue
+                self.clearToResponderQueue()
+
+        # we should not have been blocked
+        self.assertEqual(allowed, sent)
+
+        # wait for the maintenance function to run
+        time.sleep(2)
+
+        # we should still not be blocked
+        (receivedQuery, receivedResponse) = self.sendUDPQuery(query, response)
+        receivedQuery.id = query.id
+        self.assertEquals(query, receivedQuery)
+        self.assertEquals(receivedResponse, receivedResponse)
+
 class TestDynBlockGroupNoOp(DynBlocksTest):
 
     _dynBlockQPS = 10
     _dynBlockPeriod = 2
     _dynBlockDuration = 5
-    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
     _config_template = """
     local dbr = dynBlockRulesGroup()
     dbr:setQueryRate(%d, %d, "Exceeded query rate", %d, DNSAction.NoOp)
@@ -1083,8 +1146,10 @@ class TestDynBlockGroupNoOp(DynBlocksTest):
     end
 
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
+    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
 
     def testNoOp(self):
         """
@@ -1136,7 +1201,6 @@ class TestDynBlockGroupWarning(DynBlocksTest):
     _dynBlockQPS = 20
     _dynBlockPeriod = 2
     _dynBlockDuration = 5
-    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_dynBlockWarningQPS', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
     _config_template = """
     local dbr = dynBlockRulesGroup()
     dbr:setQueryRate(%d, %d, "Exceeded query rate", %d, DNSAction.Drop, %d)
@@ -1146,8 +1210,10 @@ class TestDynBlockGroupWarning(DynBlocksTest):
     end
 
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
+    _config_params = ['_dynBlockQPS', '_dynBlockPeriod', '_dynBlockDuration', '_dynBlockWarningQPS', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
 
     def testWarning(self):
         """

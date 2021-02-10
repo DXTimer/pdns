@@ -18,6 +18,7 @@ acb
 acd
 acf
 acl
+ACLTo
 ACPI
 activatedomainkey
 ada
@@ -152,6 +153,7 @@ BADTRUNC
 BADVERS
 baf
 Baj
+Bakhos
 Bakker
 Baltus
 basedn
@@ -522,6 +524,7 @@ dnswasher
 dnszone
 dnt
 Dobrawy
+dockerfiles
 docnamecachelookup
 doctrees
 documentclass
@@ -740,6 +743,7 @@ geobackend
 geoip
 geoipbackend
 geolocated
+Georgeto
 Gergely
 Gerritsen
 Gervai
@@ -1349,6 +1353,7 @@ nsupdate
 nta
 ntei
 ntlworld
+Nuitari
 nullptr
 NULs
 NUMA
@@ -1897,6 +1902,7 @@ submitters
 subnetmask
 sudo
 suffixmatchtree
+Sukhbir
 supermaster
 supermasterbackend
 supernotification
@@ -1931,6 +1937,7 @@ szw
 tarball
 Tarjei
 Tarnell
+taskqueue
 tbhandler
 tbody
 tcely
@@ -2106,7 +2113,6 @@ versionchanged
 versionmodified
 vh
 viewcode
-venv
 virtualized
 visitedlinkcolor
 vixie
@@ -2117,6 +2123,7 @@ Volker
 voxel
 Vranken
 Vsgoi
+vulns
 Vwgbclzx
 VY
 vzu

@@ -32,6 +32,7 @@
 #include "pdns/logger.hh"
 #include "pdns/version.hh"
 #include "pdns/arguments.hh"
+#include "pdns/lock.hh"
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/serialization/vector.hpp>
@@ -53,8 +54,14 @@
 // List the class version here. Default is 0
 BOOST_CLASS_VERSION(LMDBBackend::KeyDataDB, 1)
 
+static std::mutex s_lmdbOpenUpgradeLock;
+
 LMDBBackend::LMDBBackend(const std::string& suffix)
 {
+  // we lock to avoid a race condition when we do a schema upgrade during startup
+  // non-upgrade startups should be very cheap so this lock should not hurt performance
+  std::lock_guard<std::mutex> l(s_lmdbOpenUpgradeLock);
+
   setArgPrefix("lmdb"+suffix);
   
   string syncMode = toLower(getArg("sync-mode"));
@@ -544,6 +551,8 @@ std::shared_ptr<LMDBBackend::RecordsROTransaction> LMDBBackend::getRecordsROTran
 
 bool LMDBBackend::upgradeToSchemav3()
 {
+  g_log << Logger::Info<<"Upgrading LMDB schema"<<endl;
+
   for(auto i = 0; i < d_shards; i++) {
     string filename = getArg("filename")+"-"+std::to_string(i);
     if (rename(filename.c_str(), (filename+"-old").c_str()) < 0) {
@@ -670,6 +679,11 @@ bool LMDBBackend::list(const DNSName &target, int id, bool include_disabled)
   }
 
   d_lookupdomain = target;
+
+  // Make sure we start with fresh data
+  d_currentrrset.clear();
+  d_currentrrsetpos = 0;
+
   return true;
 }
 
@@ -730,6 +744,10 @@ void LMDBBackend::lookup(const QType &type, const DNSName &qdomain, int zoneId, 
   }
 
   d_lookupdomain = hunt;
+
+  // Make sure we start with fresh data
+  d_currentrrset.clear();
+  d_currentrrsetpos = 0;
 }
 
 
@@ -763,20 +781,24 @@ bool LMDBBackend::get(DNSZoneRecord& rr)
       key = d_currentKey.get<string_view>();
     }
 
-    const auto& drr = d_currentrrset.at(d_currentrrsetpos++);
+    try {
+      const auto& drr = d_currentrrset.at(d_currentrrsetpos++);
 
-    rr.dr.d_name = compoundOrdername::getQName(key) + d_lookupdomain;
-    rr.domain_id = compoundOrdername::getDomainID(key);
-    rr.dr.d_type = compoundOrdername::getQType(key).getCode();
-    rr.dr.d_ttl = drr.ttl;
-    rr.dr.d_content = deserializeContentZR(rr.dr.d_type, rr.dr.d_name, drr.content);
-    rr.auth = drr.auth;
+      rr.dr.d_name = compoundOrdername::getQName(key) + d_lookupdomain;
+      rr.domain_id = compoundOrdername::getDomainID(key);
+      rr.dr.d_type = compoundOrdername::getQType(key).getCode();
+      rr.dr.d_ttl = drr.ttl;
+      rr.dr.d_content = deserializeContentZR(rr.dr.d_type, rr.dr.d_name, drr.content);
+      rr.auth = drr.auth;
 
-    if(d_currentrrsetpos >= d_currentrrset.size()) {
-      d_currentrrset.clear();
-      if(d_getcursor->next(d_currentKey, d_currentVal) || d_currentKey.get<StringView>().rfind(d_matchkey, 0) != 0) {
-        d_getcursor.reset();
+      if(d_currentrrsetpos >= d_currentrrset.size()) {
+        d_currentrrset.clear();
+        if(d_getcursor->next(d_currentKey, d_currentVal) || d_currentKey.get<StringView>().rfind(d_matchkey, 0) != 0) {
+          d_getcursor.reset();
+        }
       }
+    } catch (const std::exception &e) {
+      throw PDNSException(e.what());
     }
 
     break;
@@ -824,7 +846,10 @@ bool LMDBBackend::getDomainInfo(const DNSName &domain, DomainInfo &di, bool getS
       serFromString(val.get<string_view>(), rr);
 
       if(rr.content.size() >= 5 * sizeof(uint32_t)) {
-        uint32_t serial = *reinterpret_cast<uint32_t*>(&rr.content[rr.content.size() - (5 * sizeof(uint32_t))]);
+        uint32_t serial;
+        // a SOA has five 32 bit fields, the first of which is the serial
+        // there are two variable length names before the serial, so we calculate from the back
+        memcpy(&serial, &rr.content[rr.content.size() - (5 * sizeof(uint32_t))], sizeof(serial));
         di.serial = ntohl(serial);
       }
     }
@@ -939,7 +964,10 @@ void LMDBBackend::getAllDomains(vector<DomainInfo> *domains, bool include_disabl
       serFromString(val.get<string_view>(), rr);
 
       if(rr.content.size() >= 5 * sizeof(uint32_t)) {
-        uint32_t serial = *reinterpret_cast<uint32_t*>(&rr.content[rr.content.size() - (5 * sizeof(uint32_t))]);
+        uint32_t serial;
+        // a SOA has five 32 bit fields, the first of which is the serial
+        // there are two variable length names before the serial, so we calculate from the back
+        memcpy(&serial, &rr.content[rr.content.size() - (5 * sizeof(uint32_t))], sizeof(serial));
         di.serial = ntohl(serial);
       }
     } else if(!include_disabled) {

@@ -4,6 +4,8 @@ import os.path
 import base64
 import json
 import requests
+import socket
+import time
 from dnsdisttests import DNSDistTest
 
 class TestAPIBasics(DNSDistTest):
@@ -22,7 +24,8 @@ class TestAPIBasics(DNSDistTest):
     _config_template = """
     setACL({"127.0.0.1/32", "::1/128"})
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
 
     def testBasicAuth(self):
@@ -235,9 +238,9 @@ class TestAPIBasics(DNSDistTest):
                     'latency-avg10000', 'latency-avg1000000', 'uptime', 'real-memory-usage', 'noncompliant-queries',
                     'noncompliant-responses', 'rdqueries', 'empty-queries', 'cache-hits',
                     'cache-misses', 'cpu-iowait', 'cpu-steal', 'cpu-sys-msec', 'cpu-user-msec', 'fd-usage', 'dyn-blocked',
-                    'dyn-block-nmg-size', 'rule-servfail', 'security-status',
+                    'dyn-block-nmg-size', 'rule-servfail', 'rule-truncated', 'security-status',
                     'udp-in-errors', 'udp-noport-errors', 'udp-recvbuf-errors', 'udp-sndbuf-errors',
-                    'doh-query-pipe-full', 'doh-response-pipe-full']
+                    'doh-query-pipe-full', 'doh-response-pipe-full', 'proxy-protocol-invalid']
 
         for key in expected:
             self.assertIn(key, values)
@@ -260,7 +263,7 @@ class TestAPIBasics(DNSDistTest):
 
         expected = ['responses', 'servfail-responses', 'queries', 'acl-drops',
                     'frontend-noerror', 'frontend-nxdomain', 'frontend-servfail',
-                    'rule-drop', 'rule-nxdomain', 'rule-refused', 'self-answered', 'downstream-timeouts',
+                    'rule-drop', 'rule-nxdomain', 'rule-refused', 'rule-truncated', 'self-answered', 'downstream-timeouts',
                     'downstream-send-errors', 'trunc-failures', 'no-policy', 'latency0-1',
                     'latency1-10', 'latency10-50', 'latency50-100', 'latency100-1000',
                     'latency-slow', 'latency-avg100', 'latency-avg1000', 'latency-avg10000',
@@ -268,7 +271,7 @@ class TestAPIBasics(DNSDistTest):
                     'noncompliant-responses', 'rdqueries', 'empty-queries', 'cache-hits',
                     'cache-misses', 'cpu-user-msec', 'cpu-sys-msec', 'fd-usage', 'dyn-blocked',
                     'dyn-block-nmg-size', 'packetcache-hits', 'packetcache-misses', 'over-capacity-drops',
-                    'too-old-drops']
+                    'too-old-drops', 'proxy-protocol-invalid', 'doh-query-pipe-full', 'doh-response-pipe-full']
 
         for key in expected:
             self.assertIn(key, content)
@@ -305,7 +308,8 @@ class TestAPIServerDown(DNSDistTest):
     setACL({"127.0.0.1/32", "::1/128"})
     newServer{address="127.0.0.1:%s"}
     getServer(0):setDown()
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
 
     def testServerDownNoLatencyLocalhost(self):
@@ -333,7 +337,8 @@ class TestAPIWritable(DNSDistTest):
     _config_template = """
     setACL({"127.0.0.1/32", "::1/128"})
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     setAPIWritable(true, "%s")
     """
 
@@ -412,7 +417,8 @@ class TestAPICustomHeaders(DNSDistTest):
     controlSocket("127.0.0.1:%s")
     setACL({"127.0.0.1/32", "::1/128"})
     newServer({address="127.0.0.1:%s"})
-    webserver("127.0.0.1:%s", "%s", "%s", {["X-Frame-Options"]="", ["X-Custom"]="custom"})
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s", customHeaders={["X-Frame-Options"]="", ["X-Custom"]="custom"} })
     """
 
     def testBasicHeaders(self):
@@ -441,6 +447,63 @@ class TestAPICustomHeaders(DNSDistTest):
         self.assertEquals(r.headers.get('x-powered-by'), "dnsdist")
         self.assertTrue("x-frame-options" in r.headers)
 
+class TestStatsWithoutAuthentication(DNSDistTest):
+
+    _webTimeout = 2.0
+    _webServerPort = 8083
+    _webServerBasicAuthPassword = 'secret'
+    _webServerAPIKey = 'apisecret'
+    # paths accessible using the API key only
+    _apiOnlyPath = '/api/v1/servers/localhost/config'
+    # paths accessible using basic auth only (list not exhaustive)
+    _basicOnlyPath = '/'
+    _noAuthenticationPaths = [ '/metrics', '/jsonstat?command=dynblocklist' ]
+    _consoleKey = DNSDistTest.generateConsoleKey()
+    _consoleKeyB64 = base64.b64encode(_consoleKey).decode('ascii')
+    _config_params = ['_consoleKeyB64', '_consolePort', '_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey']
+    _config_template = """
+    setKey("%s")
+    controlSocket("127.0.0.1:%s")
+    setACL({"127.0.0.1/32", "::1/128"})
+    newServer({address="127.0.0.1:%s"})
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s", statsRequireAuthentication=false })
+    """
+
+    def testAuth(self):
+        """
+        API: Stats do not require authentication
+        """
+
+        for path in self._noAuthenticationPaths:
+            url = 'http://127.0.0.1:' + str(self._webServerPort) + path
+
+            r = requests.get(url, timeout=self._webTimeout)
+            self.assertTrue(r)
+            self.assertEquals(r.status_code, 200)
+
+        # these should still require basic authentication
+        for path in [self._basicOnlyPath]:
+            url = 'http://127.0.0.1:' + str(self._webServerPort) + path
+
+            r = requests.get(url, timeout=self._webTimeout)
+            self.assertEquals(r.status_code, 401)
+
+            r = requests.get(url, auth=('whatever', self._webServerBasicAuthPassword), timeout=self._webTimeout)
+            self.assertTrue(r)
+            self.assertEquals(r.status_code, 200)
+
+        # these should still require API authentication
+        for path in [self._apiOnlyPath]:
+            url = 'http://127.0.0.1:' + str(self._webServerPort) + path
+
+            r = requests.get(url, timeout=self._webTimeout)
+            self.assertEquals(r.status_code, 401)
+
+            headers = {'x-api-key': self._webServerAPIKey}
+            r = requests.get(url, headers=headers, timeout=self._webTimeout)
+            self.assertTrue(r)
+            self.assertEquals(r.status_code, 200)
 
 class TestAPIAuth(DNSDistTest):
 
@@ -462,7 +525,8 @@ class TestAPIAuth(DNSDistTest):
     controlSocket("127.0.0.1:%s")
     setACL({"127.0.0.1/32", "::1/128"})
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s"})
     """
 
     def testBasicAuthChange(self):
@@ -532,7 +596,8 @@ class TestAPIACL(DNSDistTest):
     controlSocket("127.0.0.1:%s")
     setACL({"127.0.0.1/32", "::1/128"})
     newServer{address="127.0.0.1:%s"}
-    webserver("127.0.0.1:%s", "%s", "%s", {}, "192.0.2.1")
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s", acl="192.0.2.1"})
     """
 
     def testACLChange(self):
@@ -611,3 +676,44 @@ class TestCustomLuaEndpoint(DNSDistTest):
         self.assertEquals(r.status_code, 200)
         self.assertEquals(r.content, b'It works!')
         self.assertEquals(r.headers.get('foo'), "Bar")
+
+class TestWebConcurrentConnectionsL(DNSDistTest):
+
+    _webTimeout = 2.0
+    _webServerPort = 8083
+    _webServerBasicAuthPassword = 'secret'
+    _webServerAPIKey = 'apisecret'
+    _maxConns = 2
+
+    _config_params = ['_testServerPort', '_webServerPort', '_webServerBasicAuthPassword', '_webServerAPIKey', '_maxConns']
+    _config_template = """
+    newServer{address="127.0.0.1:%s"}
+    webserver("127.0.0.1:%s")
+    setWebserverConfig({password="%s", apiKey="%s", maxConcurrentConnections=%d})
+    """
+
+    def testConcurrentConnections(self):
+        """
+        Web: Concurrent connections
+        """
+
+        conns = []
+        # open the maximum number of connections
+        for _ in range(self._maxConns):
+            conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            conn.connect(("127.0.0.1", self._webServerPort))
+            conns.append(conn)
+
+        # we now hold all the slots, let's try to establish a new connection
+        url = 'http://127.0.0.1:' + str(self._webServerPort) + "/"
+        self.assertRaises(requests.exceptions.ConnectionError, requests.get, url, auth=('whatever', self._webServerBasicAuthPassword), timeout=self._webTimeout)
+
+        # free one slot
+        conns[0].close()
+        conns[0] = None
+        time.sleep(1)
+
+        # this should work
+        r = requests.get(url, auth=('whatever', self._webServerBasicAuthPassword), timeout=self._webTimeout)
+        self.assertTrue(r)
+        self.assertEquals(r.status_code, 200)

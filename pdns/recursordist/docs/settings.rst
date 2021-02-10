@@ -12,6 +12,14 @@ As an example:
  - ``serve-rfc1918=off`` or ``serve-rfc1918=no`` means: do not serve those zones.
  - Anything else means: do serve those zones.
 
+You can use ``+=`` syntax to set some variables incrementally, but this
+requires you to have at least one non-incremental setting for the
+variable to act as base setting. This is mostly useful for
+:ref:`setting-include-dir` directive. An example::
+
+  forward-zones = foo.example.com=192.168.100.1;
+  forward-zones += bar.example.com=[1234::abcde]:5353;
+
 .. _setting-allow-from:
 
 ``allow-from``
@@ -397,31 +405,22 @@ See :doc:`dns64` for more flexible but slower alternatives using Lua.
 -  One of ``off``, ``process-no-validate``, ``process``, ``log-fail``, ``validate``, String
 -  Default: ``process-no-validate``
 
-Set the mode for DNSSEC processing:
+Set the mode for DNSSEC processing, as detailed in :doc:`dnssec`.
 
-off
-^^^
-No DNSSEC processing whatsoever.
-Ignore DO-bits in queries, don't request any DNSSEC information from authoritative servers.
-This behaviour is similar to PowerDNS Recursor pre-4.0.
-
-process-no-validate
-^^^^^^^^^^^^^^^^^^^
-Respond with DNSSEC records to clients that ask for it, set the DO bit on all outgoing queries.
-Don't do any validation.
-
-process
-^^^^^^^
-Respond with DNSSEC records to clients that ask for it, set the DO bit on all outgoing queries.
-Do validation for clients that request it (by means of the AD- bit or DO-bit in the query).
-
-log-fail
-^^^^^^^^
-Similar behaviour to ``process``, but validate RRSIGs on responses and log bogus responses.
-
-validate
-^^^^^^^^
-Full blown DNSSEC validation. Send SERVFAIL to clients on bogus responses.
+``off``
+   No DNSSEC processing whatsoever.
+   Ignore DO-bits in queries, don't request any DNSSEC information from authoritative servers.
+   This behaviour is similar to PowerDNS Recursor pre-4.0.
+``process-no-validate``
+   Respond with DNSSEC records to clients that ask for it, set the DO bit on all outgoing queries.
+   Don't do any validation.
+``process``
+   Respond with DNSSEC records to clients that ask for it, set the DO bit on all outgoing queries.
+   Do validation for clients that request it (by means of the AD- bit or DO-bit in the query).
+``log-fail``
+   Similar behaviour to ``process``, but validate RRSIGs on responses and log bogus responses.
+``validate``
+   Full blown DNSSEC validation. Send SERVFAIL to clients on bogus responses.
 
 .. _setting-dnssec-log-bogus:
 
@@ -743,7 +742,7 @@ Indication of how many queries will be averaged to get the average latency repor
 ``local-address``
 -----------------
 -  IPv4/IPv6 Addresses, with optional port numbers, separated by commas or whitespace
--  Default: ``0.0.0.0, ::``
+-  Default: ``127.0.0.1``
 
 Local IP addresses to which we bind. Each address specified can
 include a port number; if no port is included then the
@@ -1240,19 +1239,16 @@ For instance, when ``foo.example.net`` is negatively cached, any query
 matching ``*.foo.example.net`` will be answered with NXDOMAIN directly
 without consulting authoritative servers.
 
-no
-^^
-No :rfc:`8020` processing is done.
+``no``
+  No :rfc:`8020` processing is done.
 
-dnssec
-^^^^^^
-:rfc:`8020` processing is only done using cached NXDOMAIN records that are
-DNSSEC validated.
+``dnssec``
+  :rfc:`8020` processing is only done using cached NXDOMAIN records that are
+  DNSSEC validated.
 
-yes
-^^^
-:rfc:`8020` processing is done using any non-Bogus NXDOMAIN record
-available in the cache.
+``yes``
+  :rfc:`8020` processing is done using any non-Bogus NXDOMAIN record
+  available in the cache.
 
 .. _setting-nsec3-max-iterations:
 
@@ -1413,6 +1409,20 @@ Sets the number of shards in the record cache. If you have high
 contention as reported by
 ``record-cache-contented/record-cache-acquired``, you can try to
 enlarge this value or run with fewer threads.
+
+.. _setting-refresh-on-ttl-perc:
+
+``refresh-on-ttl-perc``
+-----------------------
+.. versionadded: 4.5.0
+
+-  Integer
+-  Default: 0
+
+Sets the "refresh almost expired" percentage of the record cache. Whenever a record is fetched from the packet or record cache
+and only ``refresh-on-ttl-perc`` percent or less of its original TTL is left, a task is queued to refetch the name/type combination to
+update the record cache. In most cases this causes future queries to always see a non-expired record cache entry.
+A typical value is 10. If the value is zero, this functionality is disabled.
 
 .. _setting-reuseport:
 

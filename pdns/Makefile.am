@@ -6,7 +6,8 @@ AM_CPPFLAGS += \
 	$(LIBEDIT_CFLAGS) \
 	$(LIBCRYPTO_INCLUDES) \
 	$(SYSTEMD_CFLAGS) \
-	$(YAML_CFLAGS)
+	$(YAML_CFLAGS) \
+	-I$(top_srcdir)/ext/protozero/include
 
 AM_CXXFLAGS = \
 	-DSYSCONFDIR=\"$(sysconfdir)\" \
@@ -70,11 +71,16 @@ CLEANFILES = \
 	backends/gsql/gsqlbackend.gcda \
 	backends/gsql/gsqlbackend.gcno \
 	backends/gsql/gsqlbackend.gcov \
-	dnsmessage.pb.cc dnsmessage.pb.h \
 	pdns.conf-dist \
-	apidocfiles.h \
+	apidocfiles.h
+
+if !HAVE_API_SWAGGER_JSON
+# don't clean these files if they were present
+# at 'configure' time (e.g. from a source dist)
+CLEANFILES += \
 	api-swagger.yaml \
 	api-swagger.json
+endif
 
 # use a $(wildcard) wrapper here to allow build to proceed if output
 # file is present but input file is not (e.g. in a dist tarball)
@@ -112,6 +118,7 @@ if TOOLS
 bin_PROGRAMS += \
 	dnsgram \
 	dnspcap2calidns \
+	dnspcap2protobuf \
 	dnsreplay \
 	dnsscan \
 	dnsscope \
@@ -150,6 +157,7 @@ EXTRA_PROGRAMS = \
 	dnsdemog \
 	dnsgram \
 	dnspcap2calidns \
+	dnspcap2protobuf \
 	dnsreplay \
 	dnsscan \
 	dnsscope \
@@ -223,6 +231,7 @@ pdns_server_SOURCES = \
 	misc.cc misc.hh \
 	nameserver.cc nameserver.hh \
 	namespaces.hh \
+	noinitvector.hh \
 	nsecrecords.cc \
 	opensslsigners.cc opensslsigners.hh \
 	packetcache.hh \
@@ -508,7 +517,9 @@ sdig_SOURCES = \
 	dnsparser.cc dnsparser.hh \
 	dnsrecords.cc \
 	dnswriter.cc dnswriter.hh \
+	dolog.hh \
 	ednssubnet.cc iputils.cc \
+	libssl.cc libssl.hh \
 	logger.cc \
 	misc.cc misc.hh \
 	nsecrecords.cc \
@@ -520,14 +531,35 @@ sdig_SOURCES = \
 	sstuff.hh \
 	statbag.cc \
 	svc-records.cc svc-records.hh \
+	tcpiohandler.cc tcpiohandler.hh \
 	unix_utility.cc
 
+sdig_CPPFLAGS = $(AM_CPPFLAGS)
 sdig_LDADD = $(LIBCRYPTO_LIBS)
 sdig_LDFLAGS = $(AM_LDFLAGS) $(LIBCRYPTO_LDFLAGS)
 
 if HAVE_LIBCURL
 sdig_SOURCES += minicurl.cc minicurl.hh
 sdig_LDADD += $(LIBCURL)
+endif
+
+if HAVE_DNS_OVER_TLS
+
+if HAVE_GNUTLS
+sdig_CPPFLAGS += $(GNUTLS_CFLAGS)
+sdig_LDADD += -lgnutls
+endif
+
+if HAVE_LIBSSL
+sdig_CPPFLAGS += $(LIBSSL_CFLAGS)
+sdig_LDADD += $(LIBSSL_LIBS)
+endif
+
+if LIBSODIUM
+sdig_CPPFLAGS +=$(LIBSODIUM_CFLAGS)
+sdig_LDADD += $(LIBSODIUM_LIBS)
+endif
+
 endif
 
 calidns_SOURCES = \
@@ -1229,16 +1261,6 @@ dnspcap2calidns_LDADD = \
 	$(LIBCRYPTO_LIBS) \
 	$(BOOST_PROGRAM_OPTIONS_LIBS)
 
-if HAVE_PROTOBUF
-if HAVE_PROTOC
-bin_PROGRAMS += dnspcap2protobuf
-
-dnsmessage.pb.cc: dnsmessage.proto
-	$(AM_V_GEN)$(PROTOC) --cpp_out=./ $<
-
-BUILT_SOURCES += dnsmessage.pb.cc
-dnspcap2protobuf.$(OBJEXT): dnsmessage.pb.cc
-
 dnspcap2protobuf_SOURCES = \
 	base32.cc \
 	base64.cc base64.hh \
@@ -1254,7 +1276,7 @@ dnspcap2protobuf_SOURCES = \
 	logger.cc \
 	misc.cc \
 	nsecrecords.cc \
-	protobuf.cc protobuf.hh \
+	protozero.cc protozero.hh \
 	qtype.cc \
 	rcpgenerator.cc rcpgenerator.hh \
 	sillyrecords.cc \
@@ -1264,8 +1286,6 @@ dnspcap2protobuf_SOURCES = \
 	utility.hh \
 	uuid-utils.hh uuid-utils.cc
 
-nodist_dnspcap2protobuf_SOURCES=dnsmessage.pb.cc dnsmessage.pb.h
-
 dnspcap2protobuf_LDFLAGS = \
 	$(AM_LDFLAGS) \
 	$(LIBCRYPTO_LDFLAGS) \
@@ -1273,11 +1293,8 @@ dnspcap2protobuf_LDFLAGS = \
 
 dnspcap2protobuf_LDADD = \
 	$(LIBCRYPTO_LIBS) \
-	$(PROTOBUF_LIBS) \
 	$(BOOST_PROGRAM_OPTIONS_LIBS) \
 	$(RT_LIBS)
-endif
-endif
 
 pdns.conf-dist: pdns_server
 	$(AM_V_GEN)./pdns_server --config=default 2>/dev/null > $@
@@ -1348,6 +1365,7 @@ testrunner_SOURCES = \
 	test-ixfr_cc.cc \
 	test-lock_hh.cc \
 	test-lua_auth4_cc.cc \
+	test-luawrapper.cc \
 	test-misc_hh.cc \
 	test-mplexer.cc \
 	test-nameserver_cc.cc \
@@ -1431,7 +1449,7 @@ pdns_control_SOURCES = \
 	unix_utility.cc
 
 if UNIT_TESTS
-
+noinst_PROGRAMS = testrunner
 if HAVE_BOOST_GE_148
 TESTS_ENVIRONMENT = env BOOST_TEST_LOG_LEVEL=message SRCDIR='$(srcdir)'
 TESTS=testrunner

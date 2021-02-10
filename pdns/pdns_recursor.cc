@@ -98,8 +98,8 @@
 #endif /* NOD_ENABLED */
 #include "query-local-address.hh"
 
-#include "rec-protobuf.hh"
 #include "rec-snmp.hh"
+#include "rec-taskqueue.hh"
 
 #ifdef HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
@@ -107,10 +107,8 @@
 
 #include "namespaces.hh"
 
-#ifdef HAVE_PROTOBUF
 #include "uuid-utils.hh"
-#include "protozero.hh"
-#endif /* HAVE_PROTOBUF */
+#include "rec-protozero.hh"
 
 #include "xpf.hh"
 
@@ -120,12 +118,10 @@ static thread_local std::shared_ptr<RecursorLua4> t_pdl;
 static thread_local unsigned int t_id = 0;
 static thread_local std::shared_ptr<Regex> t_traceRegex;
 static thread_local std::unique_ptr<tcpClientCounts_t> t_tcpClientCounts;
-#ifdef HAVE_PROTOBUF
 static thread_local std::shared_ptr<std::vector<std::unique_ptr<RemoteLogger>>> t_protobufServers{nullptr};
 static thread_local uint64_t t_protobufServersGeneration;
 static thread_local std::shared_ptr<std::vector<std::unique_ptr<RemoteLogger>>> t_outgoingProtobufServers{nullptr};
 static thread_local uint64_t t_outgoingProtobufServersGeneration;
-#endif /* HAVE_PROTOBUF */
 
 #ifdef HAVE_FSTRM
 static thread_local std::shared_ptr<std::vector<std::unique_ptr<FrameStreamLogger>>> t_frameStreamServers{nullptr};
@@ -330,13 +326,11 @@ struct DNSComboWriter {
      d_local holds our own. */
   ComboAddress d_local;
   ComboAddress d_destination;
-#ifdef HAVE_PROTOBUF
   boost::uuids::uuid d_uuid;
   string d_requestorId;
   string d_deviceId;
   string d_deviceName;
   struct timeval d_kernelTimestamp{0,0};
-#endif
   std::string d_query;
   std::unordered_set<std::string> d_policyTags;
   std::string d_routingTag;
@@ -787,15 +781,17 @@ static void terminateTCPConnection(int fd)
   }
 }
 
-static bool sendResponseOverTCP(const std::unique_ptr<DNSComboWriter>& dc, const std::vector<uint8_t>& packet)
+/* this function is called with both a string and a vector<uint8_t> representing a packet */
+template <class T>
+static bool sendResponseOverTCP(const std::unique_ptr<DNSComboWriter>& dc, const T& packet)
 {
-  char buf[2];
+  uint8_t buf[2];
   buf[0] = packet.size() / 256;
   buf[1] = packet.size() % 256;
 
   Utility::iovec iov[2];
-  iov[0].iov_base=(void*)buf;              iov[0].iov_len=2;
-  iov[1].iov_base=(void*)&*packet.begin(); iov[1].iov_len = packet.size();
+  iov[0].iov_base = (void*)buf;              iov[0].iov_len = 2;
+  iov[1].iov_base = (void*)&*packet.begin(); iov[1].iov_len = packet.size();
 
   int wret = Utility::writev(dc->d_socket, iov, 2);
   bool hadError = true;
@@ -850,6 +846,57 @@ static void sendErrorOverTCP(std::unique_ptr<DNSComboWriter>& dc, int rcode)
 
 static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var);
 
+static void finishTCPReply(std::unique_ptr<DNSComboWriter>& dc, bool hadError, bool updateInFlight)
+{
+  // update tcp connection status, closing if needed and doing the fd multiplexer accounting
+  if (updateInFlight && dc->d_tcpConnection->d_requestsInFlight > 0) {
+    dc->d_tcpConnection->d_requestsInFlight--;
+  }
+
+  // In the code below, we try to remove the fd from the set, but
+  // we don't know if another mthread already did the remove, so we can get a
+  // "Tried to remove unlisted fd" exception.  Not that an inflight < limit test
+  // will not work since we do not know if the other mthread got an error or not.
+  if (hadError) {
+    terminateTCPConnection(dc->d_socket);
+    dc->d_socket = -1;
+    return;
+  }
+  dc->d_tcpConnection->queriesCount++;
+  if (g_tcpMaxQueriesPerConn && dc->d_tcpConnection->queriesCount >= g_tcpMaxQueriesPerConn) {
+    try {
+      t_fdm->removeReadFD(dc->d_socket);
+    }
+    catch (FDMultiplexerException &) {
+    }
+    dc->d_socket = -1;
+    return;
+  }
+
+  Utility::gettimeofday(&g_now, nullptr); // needs to be updated
+  struct timeval ttd = g_now;
+
+  // If we cross from max to max-1 in flight requests, the fd was not listened to, add it back
+  if (updateInFlight && dc->d_tcpConnection->d_requestsInFlight == TCPConnection::s_maxInFlight - 1) {
+    // A read error might have happened. If we add the fd back, it will most likely error again.
+    // This is not a big issue, the next handleTCPClientReadable() will see another read error
+    // and take action.
+    ttd.tv_sec += g_tcpTimeout;
+    t_fdm->addReadFD(dc->d_socket, handleRunningTCPQuestion, dc->d_tcpConnection, &ttd);
+    return;
+  }
+  // fd might have been removed by read error code, or a read timeout, so expect an exception
+  try {
+    t_fdm->setReadTTD(dc->d_socket, ttd, g_tcpTimeout);
+  }
+  catch (const FDMultiplexerException &) {
+    // but if the FD was removed because of a timeout while we were sending a response,
+    // we need to re-arm it. If it was an error it will error again.
+    ttd.tv_sec += g_tcpTimeout;
+    t_fdm->addReadFD(dc->d_socket, handleRunningTCPQuestion, dc->d_tcpConnection, &ttd);
+  }
+}
+
 // the idea is, only do things that depend on the *response* here. Incoming accounting is on incoming.
 static void updateResponseStats(int res, const ComboAddress& remote, unsigned int packetsize, const DNSName* query, uint16_t qtype)
 {
@@ -883,21 +930,21 @@ catch(...)
   return "Exception making error message for exception";
 }
 
-#ifdef HAVE_PROTOBUF
-static void protobufLogQuery(uint8_t maskV4, uint8_t maskV6, const boost::uuids::uuid& uniqueId, const ComboAddress& remote, const ComboAddress& local, const Netmask& ednssubnet, bool tcp, uint16_t id, size_t len, const DNSName& qname, uint16_t qtype, uint16_t qclass, const std::unordered_set<std::string>& policyTags, const std::string& requestorId, const std::string& deviceId, const std::string& deviceName)
+static void protobufLogQuery(LocalStateHolder<LuaConfigItems>& luaconfsLocal, const boost::uuids::uuid& uniqueId, const ComboAddress& remote, const ComboAddress& local, const Netmask& ednssubnet, bool tcp, uint16_t id, size_t len, const DNSName& qname, uint16_t qtype, uint16_t qclass, const std::unordered_set<std::string>& policyTags, const std::string& requestorId, const std::string& deviceId, const std::string& deviceName)
 {
   if (!t_protobufServers) {
     return;
   }
 
-  Netmask requestorNM(remote, remote.sin4.sin_family == AF_INET ? maskV4 : maskV6);
+  Netmask requestorNM(remote, remote.sin4.sin_family == AF_INET ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
   ComboAddress requestor = requestorNM.getMaskedNetwork();
   requestor.setPort(remote.getPort());
 
-  pdns::ProtoZero::Message m{128, std::string::size_type(policyTags.empty() ? 0 : 64)}; // It's a guess
+  pdns::ProtoZero::RecMessage m{128, std::string::size_type(policyTags.empty() ? 0 : 64)}; // It's a guess
+  m.setType(pdns::ProtoZero::Message::MessageType::DNSQueryType);
   m.setRequest(uniqueId, requestor, local, qname, qtype, qclass, id, tcp, len);
   m.setServerIdentity(SyncRes::s_serverID);
-  m.setEDNSSubnet(ednssubnet, ednssubnet.isIPv4() ? maskV4 : maskV6);
+  m.setEDNSSubnet(ednssubnet, ednssubnet.isIPv4() ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
   m.setRequestorId(requestorId);
   m.setDeviceId(deviceId);
   m.setDeviceName(deviceName);
@@ -912,7 +959,7 @@ static void protobufLogQuery(uint8_t maskV4, uint8_t maskV6, const boost::uuids:
   }
 }
 
-static void protobufLogResponse(pdns::ProtoZero::Message& message)
+static void protobufLogResponse(pdns::ProtoZero::RecMessage& message)
 {
   if (!t_protobufServers) {
     return;
@@ -923,7 +970,53 @@ static void protobufLogResponse(pdns::ProtoZero::Message& message)
     server->queueData(msg);
   }
 }
+
+static void protobufLogResponse(const struct dnsheader* dh, LocalStateHolder<LuaConfigItems>& luaconfsLocal,
+                                const RecursorPacketCache::OptPBData& pbData, const struct timeval& tv,
+                                bool tcp, const ComboAddress& source, const ComboAddress& destination,
+                                const EDNSSubnetOpts& ednssubnet,
+                                const boost::uuids::uuid& uniqueId, const string& requestorId, const string& deviceId,
+                                const string& deviceName) 
+{
+  pdns::ProtoZero::RecMessage pbMessage(pbData ? pbData->d_message : "", pbData ? pbData->d_response : "", 64, 10); // The extra bytes we are going to add
+  // Normally we take the immutable string from the cache and append a few values, but if it's not there (can this happen?)
+  // we start with an empty string and append the minimal
+  if (!pbData) {
+    pbMessage.setType(pdns::ProtoZero::Message::MessageType::DNSResponseType);
+    pbMessage.setServerIdentity(SyncRes::s_serverID);
+  }
+
+  // In response part
+  if (g_useKernelTimestamp && tv.tv_sec) {
+    pbMessage.setQueryTime(tv.tv_sec, tv.tv_usec);
+  }
+  else {
+    pbMessage.setQueryTime(g_now.tv_sec, g_now.tv_usec);
+  }
+
+  // In message part
+  Netmask requestorNM(source, source.sin4.sin_family == AF_INET ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
+  ComboAddress requestor = requestorNM.getMaskedNetwork();
+  pbMessage.setMessageIdentity(uniqueId);
+  pbMessage.setFrom(requestor);
+  pbMessage.setTo(destination);
+  pbMessage.setSocketProtocol(tcp);
+  pbMessage.setId(dh->id);
+
+  pbMessage.setTime();
+  pbMessage.setEDNSSubnet(ednssubnet.source, ednssubnet.source.isIPv4() ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
+  pbMessage.setRequestorId(requestorId);
+  pbMessage.setDeviceId(deviceId);
+  pbMessage.setDeviceName(deviceName);
+  pbMessage.setFromPort(source.getPort());
+  pbMessage.setToPort(destination.getPort());
+#ifdef NOD_ENABLED
+  if (g_nodEnabled) {
+    pbMessage.setNewlyObservedDomain(false);
+  }
 #endif
+  protobufLogResponse(pbMessage);
+}
 
 /**
  * Chases the CNAME provided by the PolicyCustom RPZ policy.
@@ -1049,7 +1142,6 @@ static PolicyResult handlePolicyHit(const DNSFilterEngine::Policy& appliedPolicy
   return PolicyResult::NoAction;
 }
 
-#ifdef HAVE_PROTOBUF
 static std::shared_ptr<std::vector<std::unique_ptr<RemoteLogger>>> startProtobufServers(const ProtobufExportConfig& config)
 {
   auto result = std::make_shared<std::vector<std::unique_ptr<RemoteLogger>>>();
@@ -1202,7 +1294,6 @@ static bool checkFrameStreamExport(LocalStateHolder<LuaConfigItems>& luaconfsLoc
   return true;
 }
 #endif /* HAVE_FSTRM */
-#endif /* HAVE_PROTOBUF */
 
 #ifdef NOD_ENABLED
 static bool nodCheckNewDomain(const DNSName& dname)
@@ -1261,7 +1352,7 @@ static bool udrCheckUniqueDNSRecord(const DNSName& dname, uint16_t qtype, const 
 }
 #endif /* NOD_ENABLED */
 
-int followCNAMERecords(vector<DNSRecord>& ret, const QType& qtype)
+int followCNAMERecords(vector<DNSRecord>& ret, const QType& qtype, int rcode)
 {
   vector<DNSRecord> resolved;
   DNSName target;
@@ -1276,10 +1367,10 @@ int followCNAMERecords(vector<DNSRecord>& ret, const QType& qtype)
   }
 
   if(target.empty()) {
-    return 0;
+    return rcode;
   }
 
-  int rcode = directResolve(target, qtype, QClass::IN, resolved);
+  rcode = directResolve(target, qtype, QClass::IN, resolved);
 
   for(DNSRecord& rr :  resolved) {
     ret.push_back(std::move(rr));
@@ -1433,8 +1524,7 @@ static void startDoResolve(void *p)
     // Used to tell syncres later on if we should apply NSDNAME and NSIP RPZ triggers for this query
     bool wantsRPZ(true);
     RecursorPacketCache::OptPBData pbDataForCache;
-#ifdef HAVE_PROTOBUF
-    pdns::ProtoZero::Message pbMessage;
+    pdns::ProtoZero::RecMessage pbMessage;
     if (checkProtobufExport(luaconfsLocal)) {
       pbMessage.reserve(128, 128); // It's a bit of a guess...
       pbMessage.setResponse(dc->d_mdp.d_qname, dc->d_mdp.d_qtype, dc->d_mdp.d_qclass);
@@ -1442,7 +1532,6 @@ static void startDoResolve(void *p)
 
       // RRSets added below
     }
-#endif /* HAVE_PROTOBUF */
 
 #ifdef HAVE_FSTRM
     checkFrameStreamExport(luaconfsLocal);
@@ -1500,10 +1589,8 @@ static void startDoResolve(void *p)
     }
     sr.setDNSSECValidationRequested(g_dnssecmode == DNSSECMode::ValidateAll || g_dnssecmode==DNSSECMode::ValidateForLog || ((dc->d_mdp.d_header.ad || DNSSECOK) && g_dnssecmode==DNSSECMode::Process));
 
-#ifdef HAVE_PROTOBUF
     sr.setInitialRequestId(dc->d_uuid);
     sr.setOutgoingProtobufServers(t_outgoingProtobufServers);
-#endif
 #ifdef HAVE_FSTRM
     sr.setFrameStreamServers(t_frameStreamServers);
 #endif
@@ -1527,11 +1614,9 @@ static void startDoResolve(void *p)
     dq.currentRecords = &ret;
     dq.dh = &dc->d_mdp.d_header;
     dq.data = dc->d_data;
-#ifdef HAVE_PROTOBUF
     dq.requestorId = dc->d_requestorId;
     dq.deviceId = dc->d_deviceId;
     dq.deviceName = dc->d_deviceName;
-#endif
     dq.proxyProtocolValues = &dc->d_proxyProtocolValues;
     dq.extendedErrorCode = &dc->d_extendedErrorCode;
     dq.extendedErrorExtra = &dc->d_extendedErrorExtra;
@@ -1606,7 +1691,7 @@ static void startDoResolve(void *p)
         ret = std::move(dc->d_records);
         res = *dc->d_rcode;
         if (res == RCode::NoError && dc->d_followCNAMERecords) {
-          res = followCNAMERecords(ret, QType(dc->d_mdp.d_qtype));
+          res = followCNAMERecords(ret, QType(dc->d_mdp.d_qtype), res);
         }
         goto haveAnswer;
       }
@@ -1843,11 +1928,9 @@ static void startDoResolve(void *p)
 	}
 #endif /* NOD ENABLED */
 
-#ifdef HAVE_PROTOBUF
         if (t_protobufServers) {
           pbMessage.addRR(*i, luaconfsLocal->protobufExportConfig.exportTypes, udr);
         }
-#endif
       }
       if(needCommit)
 	pw.commit();
@@ -1964,7 +2047,6 @@ static void startDoResolve(void *p)
       }
     }
 #endif /* NOD_ENABLED */
-#ifdef HAVE_PROTOBUF
     if (t_protobufServers && !(luaconfsLocal->protobufExportConfig.taggedOnly && appliedPolicy.getName().empty() && dc->d_policyTags.empty())) {
       // Start constructing embedded DNSResponse object
       pbMessage.setResponseCode(pw.getHeader()->rcode);
@@ -2024,8 +2106,21 @@ static void startDoResolve(void *p)
         protobufLogResponse(pbMessage);
       }
     }
-#endif /* HAVE_PROTOBUF */
-    if(!dc->d_tcp) {
+
+    if (variableAnswer || sr.wasVariable()) {
+      g_stats.variableResponses++;
+    }
+    if (!SyncRes::s_nopacketcache && !variableAnswer && !sr.wasVariable()) {
+      t_packetCache->insertResponsePacket(dc->d_tag, dc->d_qhash, std::move(dc->d_query), dc->d_mdp.d_qname,
+                                          dc->d_mdp.d_qtype, dc->d_mdp.d_qclass,
+                                          string((const char*)&*packet.begin(), packet.size()),
+                                          g_now.tv_sec,
+                                          pw.getHeader()->rcode == RCode::ServFail ? SyncRes::s_packetcacheservfailttl :
+                                          min(minTTL,SyncRes::s_packetcachettl),
+                                          dq.validationState,
+                                          std::move(pbDataForCache), dc->d_tcp);
+    }
+    if (!dc->d_tcp) {
       struct msghdr msgh;
       struct iovec iov;
       cmsgbuf_aligned cbuf;
@@ -2041,69 +2136,10 @@ static void startDoResolve(void *p)
               << strerror(sendErr) << endl;
       }
 
-      if(variableAnswer || sr.wasVariable()) {
-        g_stats.variableResponses++;
-      }
-      if(!SyncRes::s_nopacketcache && !variableAnswer && !sr.wasVariable() ) {
-        t_packetCache->insertResponsePacket(dc->d_tag, dc->d_qhash, std::move(dc->d_query), dc->d_mdp.d_qname, dc->d_mdp.d_qtype, dc->d_mdp.d_qclass,
-                                            string((const char*)&*packet.begin(), packet.size()),
-                                            g_now.tv_sec,
-                                            pw.getHeader()->rcode == RCode::ServFail ? SyncRes::s_packetcacheservfailttl :
-                                            min(minTTL,SyncRes::s_packetcachettl),
-                                            dq.validationState,
-                                            std::move(pbDataForCache));
-      }
     }
     else {
       bool hadError = sendResponseOverTCP(dc, packet);
-
-      // update tcp connection status, closing if needed and doing the fd multiplexer accounting
-      if  (dc->d_tcpConnection->d_requestsInFlight > 0) {
-        dc->d_tcpConnection->d_requestsInFlight--;
-      }
-
-      // In the code below, we try to remove the fd from the set, but
-      // we don't know if another mthread already did the remove, so we can get a
-      // "Tried to remove unlisted fd" exception.  Not that an inflight < limit test
-      // will not work since we do not know if the other mthread got an error or not.
-      if(hadError) {
-        terminateTCPConnection(dc->d_socket);
-        dc->d_socket = -1;
-      }
-      else {
-        dc->d_tcpConnection->queriesCount++;
-        if (g_tcpMaxQueriesPerConn && dc->d_tcpConnection->queriesCount >= g_tcpMaxQueriesPerConn) {
-          try {
-            t_fdm->removeReadFD(dc->d_socket);
-          }
-          catch (FDMultiplexerException &) {
-          }
-          dc->d_socket = -1;
-        }
-        else {
-          Utility::gettimeofday(&g_now, 0); // needs to be updated
-          struct timeval ttd = g_now;
-          // If we cross from max to max-1 in flight requests, the fd was not listened to, add it back
-          if (dc->d_tcpConnection->d_requestsInFlight == TCPConnection::s_maxInFlight - 1) {
-            // A read error might have happened. If we add the fd back, it will most likely error again.
-            // This is not a big issue, the next handleTCPClientReadable() will see another read error
-            // and take action.
-            ttd.tv_sec += g_tcpTimeout;
-            t_fdm->addReadFD(dc->d_socket, handleRunningTCPQuestion, dc->d_tcpConnection, &ttd);
-          } else {
-            // fd might have been removed by read error code, or a read timeout, so expect an exception
-            try {
-              t_fdm->setReadTTD(dc->d_socket, ttd, g_tcpTimeout);
-            }
-            catch (const FDMultiplexerException &) {
-              // but if the FD was removed because of a timeout while we were sending a response,
-              // we need to re-arm it. If it was an error it will error again.
-              ttd.tv_sec += g_tcpTimeout;
-              t_fdm->addReadFD(dc->d_socket, handleRunningTCPQuestion, dc->d_tcpConnection, &ttd);
-            }
-          }
-        }
-      }
+      finishTCPReply(dc, hadError, true);
     }
 
     float spent=makeFloat(sr.getNow()-dc->d_now);
@@ -2194,6 +2230,8 @@ static void startDoResolve(void *p)
     g_log<<Logger::Error<<"Any other exception in a resolver context "<< makeLoginfo(dc) <<endl;
   }
 
+  runTaskOnce(g_logCommonErrors);
+
   g_stats.maxMThreadStackUsage = max(MT->getMaxStackUsage(), g_stats.maxMThreadStackUsage);
 }
 
@@ -2260,13 +2298,13 @@ static void getQNameAndSubnet(const std::string& question, DNSName* dnsname, uin
     /* OPT root label (1) followed by type (2) */
     if(lookForECS && ntohs(drh->d_type) == QType::OPT) {
       if (!options) {
-        char* ecsStart = nullptr;
+        size_t ecsStartPosition = 0;
         size_t ecsLen = 0;
         /* we need to pass the record len */
-        int res = getEDNSOption(const_cast<char*>(reinterpret_cast<const char*>(&question.at(pos - sizeof(drh->d_clen)))), questionLen - pos + sizeof(drh->d_clen), EDNSOptionCode::ECS, &ecsStart, &ecsLen);
+        int res = getEDNSOption(reinterpret_cast<const char*>(&question.at(pos - sizeof(drh->d_clen))), questionLen - pos + sizeof(drh->d_clen), EDNSOptionCode::ECS, &ecsStartPosition, &ecsLen);
         if (res == 0 && ecsLen > 4) {
           EDNSSubnetOpts eso;
-          if(getEDNSSubnetOptsFromString(ecsStart + 4, ecsLen - 4, &eso)) {
+          if(getEDNSSubnetOptsFromString(&question.at(pos - sizeof(drh->d_clen) + ecsStartPosition + 4), ecsLen - 4, &eso)) {
             *ednssubnet=eso;
             foundECS = true;
           }
@@ -2314,6 +2352,45 @@ static bool handleTCPReadResult(int fd, ssize_t bytes)
   }
 
   return true;
+}
+
+static bool checkForCacheHit(bool qnameParsed, unsigned int tag, const string& data,
+                             DNSName& qname, uint16_t& qtype, uint16_t& qclass,
+                             const struct timeval& now,
+                             string& response, uint32_t& qhash,
+                             RecursorPacketCache::OptPBData& pbData, bool tcp, const ComboAddress& source) 
+{
+  bool cacheHit = false;
+  uint32_t age;
+  vState valState;
+  
+  if (qnameParsed) {
+    cacheHit = !SyncRes::s_nopacketcache && t_packetCache->getResponsePacket(tag, data, qname, qtype, qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp);
+  } else {
+    cacheHit = !SyncRes::s_nopacketcache && t_packetCache->getResponsePacket(tag, data, qname, &qtype, &qclass, now.tv_sec, &response, &age, &valState, &qhash, &pbData, tcp);
+  }
+
+  if (cacheHit) {
+    if (vStateIsBogus(valState)) {
+      if (t_bogusremotes) {
+        t_bogusremotes->push_back(source);
+      }
+      if (t_bogusqueryring) {
+        t_bogusqueryring->push_back(make_pair(qname, qtype));
+      }
+    }
+
+    g_stats.packetCacheHits++;
+    SyncRes::s_queries++;
+    ageDNSPacket(response, age);
+    if (response.length() >= sizeof(struct dnsheader)) {
+      const struct dnsheader *dh = reinterpret_cast<const dnsheader*>(response.data());
+      updateResponseStats(dh->rcode, source, response.length(), 0, 0);
+    }
+    g_stats.avgLatencyUsec = (1.0 - 1.0 / g_latencyStatSize) * g_stats.avgLatencyUsec + 0.0; // we assume 0 usec
+    g_stats.avgLatencyOursUsec = (1.0 - 1.0 / g_latencyStatSize) * g_stats.avgLatencyOursUsec + 0.0; // we assume 0 usec
+  }
+  return cacheHit;
 }
 
 static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
@@ -2475,14 +2552,14 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
       string deviceId;
       string deviceName;
       bool logQuery = false;
-#ifdef HAVE_PROTOBUF
+      bool qnameParsed = false;
+
       auto luaconfsLocal = g_luaconfs.getLocal();
       if (checkProtobufExport(luaconfsLocal)) {
         needECS = true;
       }
       logQuery = t_protobufServers && luaconfsLocal->protobufExportConfig.logQueries;
       dc->d_logResponse = t_protobufServers && luaconfsLocal->protobufExportConfig.logResponses;
-#endif /* HAVE_PROTOBUF */
 
 #ifdef HAVE_FSTRM
       checkFrameStreamExport(luaconfsLocal);
@@ -2498,6 +2575,7 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
           getQNameAndSubnet(conn->data, &qname, &qtype, &qclass,
                             dc->d_ecsFound, &dc->d_ednssubnet, g_gettagNeedsEDNSOptions ? &ednsOptions : nullptr,
                             xpfFound, needXPF ? &dc->d_source : nullptr, needXPF ? &dc->d_destination : nullptr);
+          qnameParsed = true;
 
           if(t_pdl) {
             try {
@@ -2526,8 +2604,7 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
 
       const struct dnsheader* dh = reinterpret_cast<const struct dnsheader*>(&conn->data[0]);
 
-#ifdef HAVE_PROTOBUF
-      if(t_protobufServers || t_outgoingProtobufServers) {
+      if (t_protobufServers || t_outgoingProtobufServers) {
         dc->d_requestorId = requestorId;
         dc->d_deviceId = deviceId;
         dc->d_deviceName = deviceName;
@@ -2538,7 +2615,7 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
         try {
 
           if (logQuery && !(luaconfsLocal->protobufExportConfig.taggedOnly && dc->d_policyTags.empty())) {
-            protobufLogQuery(luaconfsLocal->protobufMaskV4, luaconfsLocal->protobufMaskV6, dc->d_uuid, dc->d_source, dc->d_destination, dc->d_ednssubnet.source, true, dh->id, conn->qlen, qname, qtype, qclass, dc->d_policyTags, dc->d_requestorId, dc->d_deviceId, dc->d_deviceName);
+            protobufLogQuery(luaconfsLocal, dc->d_uuid, dc->d_source, dc->d_destination, dc->d_ednssubnet.source, true, dh->id, conn->qlen, qname, qtype, qclass, dc->d_policyTags, dc->d_requestorId, dc->d_deviceId, dc->d_deviceName);
           }
         }
         catch (const std::exception& e) {
@@ -2547,7 +2624,7 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
           }
         }
       }
-#endif
+
       if (t_pdl) {
         if (t_pdl->ipfilter(dc->d_source, dc->d_destination, *dh)) {
           if (!g_quiet) {
@@ -2584,21 +2661,45 @@ static void handleRunningTCPQuestion(int fd, FDMultiplexer::funcparam_t& var)
         return;
       }
       else {
+        // We have read a proper query
         ++g_stats.qcounter;
         ++g_stats.tcpqcounter;
-        ++conn->d_requestsInFlight;
-        if (conn->d_requestsInFlight >= TCPConnection::s_maxInFlight) {
-          t_fdm->removeReadFD(fd); // should no longer awake ourselves when there is data to read
+
+        string response;
+        RecursorPacketCache::OptPBData pbData{boost::none};
+
+        /* It might seem like a good idea to skip the packet cache lookup if we know that the answer is not cacheable,
+           but it means that the hash would not be computed. If some script decides at a later time to mark back the answer
+           as cacheable we would cache it with a wrong tag, so better safe than sorry. */
+        bool cacheHit = checkForCacheHit(qnameParsed, dc->d_tag, conn->data, qname, qtype, qclass, g_now, response, dc->d_qhash, pbData, true, dc->d_source);
+
+        if (cacheHit) {
+          if (t_protobufServers && dc->d_logResponse && !(luaconfsLocal->protobufExportConfig.taggedOnly && pbData && !pbData->d_tagged)) {
+            struct timeval tv{0, 0};
+            protobufLogResponse(dh, luaconfsLocal, pbData, tv, true, dc->d_source, dc->d_destination, dc->d_ednssubnet, dc->d_uuid, dc->d_requestorId, dc->d_deviceId, dc->d_deviceName);
+          }
+
+          if (!g_quiet) {
+            g_log<<Logger::Notice<<t_id<< " TCP question answered from packet cache tag="<<dc->d_tag<<" from "<<dc->d_source.toStringWithPort()<<(dc->d_source != dc->d_remote ? " (via "+dc->d_remote.toStringWithPort()+")" : "")<<endl;
+          }
+
+          bool hadError = sendResponseOverTCP(dc, response);
+          finishTCPReply(dc, hadError, false);
         } else {
-          Utility::gettimeofday(&g_now, 0); // needed?
-          struct timeval ttd = g_now;
-          t_fdm->setReadTTD(fd, ttd, g_tcpTimeout);
-        }
-        MT->makeThread(startDoResolve, dc.release()); // deletes dc
-        return;
-      }
-    }
-  }
+          // No cache hit, setup for startDoResolve() in an mthread
+          ++conn->d_requestsInFlight;
+          if (conn->d_requestsInFlight >= TCPConnection::s_maxInFlight) {
+            t_fdm->removeReadFD(fd); // should no longer awake ourselves when there is data to read
+          } else {
+            Utility::gettimeofday(&g_now, nullptr); // needed?
+            struct timeval ttd = g_now;
+            t_fdm->setReadTTD(fd, ttd, g_tcpTimeout);
+          }
+          MT->makeThread(startDoResolve, dc.release()); // deletes dc
+        } // Cache hit or not
+      } // good query
+    } // read full query
+  } // reading query
 }
 
 static bool expectProxyProtocol(const ComboAddress& from)
@@ -2710,7 +2811,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   string routingTag;
   bool logQuery = false;
   bool logResponse = false;
-#ifdef HAVE_PROTOBUF
   boost::uuids::uuid uniqueId;
   auto luaconfsLocal = g_luaconfs.getLocal();
   if (checkProtobufExport(luaconfsLocal)) {
@@ -2721,7 +2821,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   }
   logQuery = t_protobufServers && luaconfsLocal->protobufExportConfig.logQueries;
   logResponse = t_protobufServers && luaconfsLocal->protobufExportConfig.logResponses;
-#endif
 #ifdef HAVE_FSTRM
   checkFrameStreamExport(luaconfsLocal);
 #endif
@@ -2739,7 +2838,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
     DNSName qname;
     uint16_t qtype=0;
     uint16_t qclass=0;
-    uint32_t age;
     bool qnameParsed=false;
 #ifdef MALLOC_TRACE
     /*
@@ -2793,82 +2891,26 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
       }
     }
 
-    bool cacheHit = false;
     RecursorPacketCache::OptPBData pbData{boost::none};
-#ifdef HAVE_PROTOBUF
+
     if (t_protobufServers) {
       if (logQuery && !(luaconfsLocal->protobufExportConfig.taggedOnly && policyTags.empty())) {
-        protobufLogQuery(luaconfsLocal->protobufMaskV4, luaconfsLocal->protobufMaskV6, uniqueId, source, destination, ednssubnet.source, false, dh->id, question.size(), qname, qtype, qclass, policyTags, requestorId, deviceId, deviceName);
+        protobufLogQuery(luaconfsLocal, uniqueId, source, destination, ednssubnet.source, false, dh->id, question.size(), qname, qtype, qclass, policyTags, requestorId, deviceId, deviceName);
       }
     }
-#endif /* HAVE_PROTOBUF */
 
     /* It might seem like a good idea to skip the packet cache lookup if we know that the answer is not cacheable,
        but it means that the hash would not be computed. If some script decides at a later time to mark back the answer
        as cacheable we would cache it with a wrong tag, so better safe than sorry. */
-    vState valState;
-    if (qnameParsed) {
-      cacheHit = !SyncRes::s_nopacketcache && t_packetCache->getResponsePacket(ctag, question, qname, qtype, qclass, g_now.tv_sec, &response, &age, &valState, &qhash, &pbData);
-    }
-    else {
-      cacheHit = !SyncRes::s_nopacketcache && t_packetCache->getResponsePacket(ctag, question, qname, &qtype, &qclass, g_now.tv_sec, &response, &age, &valState, &qhash, &pbData);
-    }
-
+    bool cacheHit = checkForCacheHit(qnameParsed, ctag, question, qname, qtype, qclass, g_now, response, qhash, pbData, false, source);
     if (cacheHit) {
-      if (vStateIsBogus(valState)) {
-        if(t_bogusremotes)
-          t_bogusremotes->push_back(source);
-        if(t_bogusqueryring)
-          t_bogusqueryring->push_back(make_pair(qname, qtype));
+      if (t_protobufServers && logResponse && !(luaconfsLocal->protobufExportConfig.taggedOnly && pbData && !pbData->d_tagged)) {
+        protobufLogResponse(dh, luaconfsLocal, pbData, tv, false, source, destination, ednssubnet, uniqueId, requestorId, deviceId, deviceName);
       }
 
-#ifdef HAVE_PROTOBUF
-      if(t_protobufServers && logResponse && !(luaconfsLocal->protobufExportConfig.taggedOnly && pbData && !pbData->d_tagged)) { // XXX
-        pdns::ProtoZero::Message pbMessage(pbData ? pbData->d_message : "", pbData ? pbData->d_response : "", 64, 10); // The extra bytes we are going to add
-        if (pbData) {
-          // We take the inmutable string from the cache and are appending a few values
-        } else {
-          pbMessage.setType(2); // Response
-          pbMessage.setServerIdentity(SyncRes::s_serverID);
-        }
-
-        // In response part
-        if (g_useKernelTimestamp && tv.tv_sec) {
-          pbMessage.setQueryTime(tv.tv_sec, tv.tv_usec);
-        }
-        else {
-          pbMessage.setQueryTime(g_now.tv_sec, g_now.tv_usec);
-        }
-        // In message part
-        Netmask requestorNM(source, source.sin4.sin_family == AF_INET ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
-        ComboAddress requestor = requestorNM.getMaskedNetwork();
-        pbMessage.setMessageIdentity(uniqueId);
-        pbMessage.setFrom(requestor);
-        pbMessage.setTo(destination);
-        pbMessage.setSocketProtocol(false);
-        pbMessage.setId(dh->id);
-
-        pbMessage.setTime();
-        pbMessage.setEDNSSubnet(ednssubnet.source, ednssubnet.source.isIPv4() ? luaconfsLocal->protobufMaskV4 : luaconfsLocal->protobufMaskV6);
-        pbMessage.setRequestorId(requestorId);
-        pbMessage.setDeviceId(deviceId);
-        pbMessage.setDeviceName(deviceName);
-        pbMessage.setFromPort(source.getPort());
-        pbMessage.setToPort(destination.getPort());
-#ifdef NOD_ENABLED
-        if (g_nodEnabled) {
-          pbMessage.setNewlyObservedDomain(false);
-        }
-#endif
-        protobufLogResponse(pbMessage);
-      }
-#endif /* HAVE_PROTOBUF */
-      if(!g_quiet)
+      if (!g_quiet) {
         g_log<<Logger::Notice<<t_id<< " question answered from packet cache tag="<<ctag<<" from "<<source.toStringWithPort()<<(source != fromaddr ? " (via "+fromaddr.toStringWithPort()+")" : "")<<endl;
-
-      g_stats.packetCacheHits++;
-      SyncRes::s_queries++;
-      ageDNSPacket(response, age);
+      }
       struct msghdr msgh;
       struct iovec iov;
       cmsgbuf_aligned cbuf;
@@ -2884,13 +2926,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
               << (source != fromaddr ? " (via " + fromaddr.toStringWithPort() + ")" : "") << " failed with: "
               << strerror(sendErr) << endl;
       }
-      if(response.length() >= sizeof(struct dnsheader)) {
-        struct dnsheader tmpdh;
-        memcpy(&tmpdh, response.c_str(), sizeof(tmpdh));
-        updateResponseStats(tmpdh.rcode, source, response.length(), 0, 0);
-      }
-      g_stats.avgLatencyUsec=(1-1.0/g_latencyStatSize)*g_stats.avgLatencyUsec + 0.0; // we assume 0 usec
-      g_stats.avgLatencyOursUsec=(1-1.0/g_latencyStatSize)*g_stats.avgLatencyOursUsec + 0.0; // we assume 0 usec
       return 0;
     }
   }
@@ -2934,7 +2969,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   dc->d_followCNAMERecords = followCNAMEs;
   dc->d_rcode = rcode;
   dc->d_logResponse = logResponse;
-#ifdef HAVE_PROTOBUF
   if (t_protobufServers || t_outgoingProtobufServers) {
     dc->d_uuid = std::move(uniqueId);
   }
@@ -2942,7 +2976,6 @@ static string* doProcessUDPQuestion(const std::string& question, const ComboAddr
   dc->d_deviceId = deviceId;
   dc->d_deviceName = deviceName;
   dc->d_kernelTimestamp = tv;
-#endif
   dc->d_proxyProtocolValues = std::move(proxyProtocolValues);
   dc->d_routingTag = std::move(routingTag);
   dc->d_extendedErrorCode = extendedErrorCode;
@@ -3010,8 +3043,7 @@ static void handleNewUDPQuestion(int fd, FDMultiplexer::funcparam_t& var)
       else if (len > 512) {
         /* we only allow UDP packets larger than 512 for those with a proxy protocol header */
         g_stats.truncatedDrops++;
-        if (!g_quiet) {
-          g_log<<Logger::Error<<"Ignoring truncated query from "<<fromaddr.toStringWithPort()<<endl;
+        if (!g_quiet) {          g_log<<Logger::Error<<"Ignoring truncated query from "<<fromaddr.toStringWithPort()<<endl;
         }
         return;
       }
@@ -3383,6 +3415,9 @@ static void doStats(void)
   auto rc_stats = g_recCache->stats();
   double r = rc_stats.second == 0 ? 0.0 : (100.0 * rc_stats.first / rc_stats.second);
   uint64_t negCacheSize = g_negCache->size();
+  auto taskPushes = getTaskPushes();
+  auto taskExpired = getTaskExpired();
+  auto taskSize = getTaskSize();
 
   if(g_stats.qcounter && (cacheHits + cacheMisses) && SyncRes::s_queries && SyncRes::s_outqueries) {
     g_log<<Logger::Notice<<"stats: "<<g_stats.qcounter<<" questions, "<<
@@ -3415,6 +3450,7 @@ static void doStats(void)
       }
     }
 
+    g_log<<Logger::Notice<<"stats: tasks pushed/expired/queuesize: " << taskPushes << '/' << taskExpired << '/' << taskSize << endl; 
     time_t now = time(0);
     if(lastOutputTime && lastQueryCount && now != lastOutputTime) {
       g_log<<Logger::Notice<<"stats: "<< (SyncRes::s_queries - lastQueryCount) / (now - lastOutputTime) <<" qps (average over "<< (now - lastOutputTime) << " seconds)"<<endl;
@@ -3447,6 +3483,8 @@ static void houseKeeping(void *)
       return;
     }
     s_running=true;
+
+    runTaskOnce(g_logCommonErrors);
 
     struct timeval now, past;
     Utility::gettimeofday(&now, nullptr);
@@ -3803,7 +3841,6 @@ static vector<pair<DNSName, uint16_t> >& operator+=(vector<pair<DNSName, uint16_
   a.insert(a.end(), b.begin(), b.end());
   return a;
 }
-
 
 /*
   This function should only be called by the handler to gather metrics, wipe the cache,
@@ -4563,6 +4600,9 @@ static int serviceMain(int argc, char*argv[])
   SyncRes::s_maxtotusec=1000*::arg().asNum("max-total-msec");
   SyncRes::s_maxdepth=::arg().asNum("max-recursion-depth");
   SyncRes::s_rootNXTrust = ::arg().mustDo( "root-nx-trust");
+  SyncRes::s_refresh_ttlperc = ::arg().asNum("refresh-on-ttl-perc");
+  RecursorPacketCache::s_refresh_ttlperc = SyncRes::s_refresh_ttlperc;
+
   if(SyncRes::s_serverID.empty()) {
     SyncRes::s_serverID = myHostname;
   }
@@ -4995,9 +5035,6 @@ static int serviceMain(int argc, char*argv[])
     }
   }
 
-#ifdef HAVE_PROTOBUF
-  google::protobuf::ShutdownProtobufLibrary();
-#endif /* HAVE_PROTOBUF */
   return ret;
 }
 
@@ -5075,12 +5112,10 @@ try
   MT=std::unique_ptr<MTasker<PacketID,string> >(new MTasker<PacketID,string>(::arg().asNum("stack-size")));
   threadInfo.mt = MT.get();
 
-#ifdef HAVE_PROTOBUF
   /* start protobuf export threads if needed */
   auto luaconfsLocal = g_luaconfs.getLocal();
   checkProtobufExport(luaconfsLocal);
   checkOutgoingProtobufExport(luaconfsLocal);
-#endif /* HAVE_PROTOBUF */
 #ifdef HAVE_FSTRM
   checkFrameStreamExport(luaconfsLocal);
 #endif
@@ -5242,7 +5277,7 @@ int main(int argc, char **argv)
   int ret = EXIT_SUCCESS;
 
   try {
-#if __SANITIZE_ADDRESS__
+#if HAVE_FIBER_SANITIZER
     // Asan needs more stack
     ::arg().set("stack-size","stack size per mthread")="400000";
 #else
@@ -5292,7 +5327,7 @@ int main(int argc, char **argv)
     ::arg().set("carbon-server", "If set, send metrics in carbon (graphite) format to this server IP address")="";
     ::arg().set("carbon-interval", "Number of seconds between carbon (graphite) updates")="30";
     ::arg().set("carbon-namespace", "If set overwrites the first part of the carbon string")="pdns";
-    ::arg().set("carbon-instance", "If set overwrites the the instance name default")="recursor";
+    ::arg().set("carbon-instance", "If set overwrites the instance name default")="recursor";
 
     ::arg().set("statistics-interval", "Number of seconds between printing of recursor statistics, 0 to disable")="1800";
     ::arg().set("quiet","Suppress logging of questions and answers")="";
@@ -5435,6 +5470,7 @@ int main(int argc, char **argv)
     ::arg().setSwitch("nothing-below-nxdomain", "When an NXDOMAIN exists in cache for a name with fewer labels than the qname, send NXDOMAIN without doing a lookup (see RFC 8020)")="dnssec";
     ::arg().set("max-generate-steps", "Maximum number of $GENERATE steps when loading a zone from a file")="0";
     ::arg().set("record-cache-shards", "Number of shards in the record cache")="1024";
+    ::arg().set("refresh-on-ttl-perc", "If a record is requested from the cache and only this % of original TTL remains, refetch") = "0";
 
 #ifdef NOD_ENABLED
     ::arg().set("new-domain-tracking", "Track newly observed domains (i.e. never seen before).")="no";
@@ -5567,3 +5603,4 @@ int main(int argc, char **argv)
 
   return ret;
 }
+

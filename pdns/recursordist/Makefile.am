@@ -34,10 +34,6 @@ BUILT_SOURCES=htmlfiles.h \
 	dnslabeltext.cc
 
 CLEANFILES = htmlfiles.h \
-	dnsmessage.pb.cc \
-	dnsmessage.pb.h \
-	dnstap.pb.cc \
-	dnstap.pb.h \
 	recursor.conf-dist
 
 htmlfiles.h: html/*
@@ -67,7 +63,7 @@ EXTRA_DIST = \
 	NOTICE \
 	opensslsigners.hh opensslsigners.cc \
 	portsmplexer.cc \
-	dnstap.proto dnstap.cc dnstap.hh fstrm_logger.cc fstrm_logger.hh rec-dnstap.hh \
+	dnstap.proto dnstap.cc dnstap.hh fstrm_logger.cc fstrm_logger.hh \
 	ext/protozero/include/* \
 	rrd/* \
 	html incfiles \
@@ -140,13 +136,13 @@ pdns_recursor_SOURCES = \
 	mtasker_context.cc mtasker_context.hh \
 	namespaces.hh \
 	negcache.hh negcache.cc \
+	noinitvector.hh \
 	nsecrecords.cc \
 	opensslsigners.cc opensslsigners.hh \
 	packetcache.hh \
 	pdns_recursor.cc \
 	pdnsexception.hh \
 	pollmplexer.cc \
-	protobuf.cc protobuf.hh \
 	protozero.cc protozero.hh \
 	proxy-protocol.cc proxy-protocol.hh \
 	pubsuffix.hh pubsuffix.cc \
@@ -156,8 +152,9 @@ pdns_recursor_SOURCES = \
 	rcpgenerator.cc rcpgenerator.hh \
 	rec-carbon.cc \
 	rec-lua-conf.hh rec-lua-conf.cc \
-	rec-protobuf.cc rec-protobuf.hh \
+	rec-protozero.cc rec-protozero.hh \
 	rec-snmp.hh rec-snmp.cc \
+	rec-taskqueue.cc rec-taskqueue.hh \
 	rec_channel.cc rec_channel.hh rec_metrics.hh \
 	rec_channel_rec.cc \
 	recpacketcache.cc recpacketcache.hh \
@@ -181,6 +178,7 @@ pdns_recursor_SOURCES = \
 	stable-bloom.hh \
 	svc-records.cc svc-records.hh \
 	syncres.cc syncres.hh \
+	taskqueue.cc taskqueue.hh \
 	threadname.hh threadname.cc \
 	tsigverifier.cc tsigverifier.hh \
 	ueberbackend.hh \
@@ -259,11 +257,9 @@ testrunner_SOURCES = \
 	opensslsigners.cc opensslsigners.hh \
 	pdnsexception.hh \
 	pollmplexer.cc \
-	protobuf.cc protobuf.hh \
 	qtype.cc qtype.hh \
 	query-local-address.hh query-local-address.cc \
 	rcpgenerator.cc \
-	rec-protobuf.cc rec-protobuf.hh \
 	recpacketcache.cc recpacketcache.hh \
 	recursor_cache.cc recursor_cache.hh \
 	resolver.hh resolver.cc \
@@ -290,6 +286,7 @@ testrunner_SOURCES = \
 	test-filterpo_cc.cc \
 	test-iputils_hh.cc \
 	test-ixfr_cc.cc \
+	test-luawrapper.cc \
 	test-misc_hh.cc \
 	test-mplexer.cc \
 	test-mtasker.cc \
@@ -396,41 +393,9 @@ testrunner_SOURCES += \
 	portsmplexer.cc
 endif
 
-if HAVE_PROTOBUF
-if HAVE_PROTOC
-dnsmessage.pb.cc: dnsmessage.proto
-	$(AM_V_GEN)$(PROTOC) --cpp_out=./ $<
-
-if FSTRM
-dnstap.pb.cc: dnstap.proto
-	$(AM_V_GEN)$(PROTOC) -I$(srcdir) --cpp_out=./ $<
-endif
-
-
-BUILT_SOURCES += dnsmessage.pb.cc
-pdns_recursor_LDADD += $(PROTOBUF_LIBS)
-nodist_pdns_recursor_SOURCES = dnsmessage.pb.cc dnsmessage.pb.h
-nodist_testrunner_SOURCES = dnsmessage.pb.cc dnsmessage.pb.h
-
-if FSTRM
-BUILT_SOURCES += dnstap.pb.cc
-pdns_recursor.$(OBJEXT): dnstap.pb.cc dnsmessage.pb.cc
-testrunner$(OBJEXT): dnstap.pb.cc dnsmessage.pb.cc
-nodist_pdns_recursor_SOURCES += dnstap.pb.cc dnstap.pb.h
-nodist_testrunner_SOURCES += dnstap.pb.cc dnstap.pb.h
-else
-pdns_recursor.$(OBJEXT): dnsmessage.pb.cc
-testrunner$(OBJEXT): dnsmessage.pb.cc
-endif
-
-testrunner_LDADD += $(PROTOBUF_LIBS)
-
-endif
-endif
-
 if FSTRM
 pdns_recursor_SOURCES += \
-	dnstap.cc dnstap.hh rec-dnstap.hh
+	dnstap.cc dnstap.hh
 
 pdns_recursor_LDADD += \
 	$(FSTRM_LIBS)

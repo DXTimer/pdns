@@ -37,6 +37,8 @@
 #include "secpoll-recursor.hh"
 #include "pubsuffix.hh"
 #include "namespaces.hh"
+#include "rec-taskqueue.hh"
+
 std::mutex g_carbon_config_lock;
 
 static map<string, const uint32_t*> d_get32bitpointers;
@@ -1037,12 +1039,8 @@ static uint64_t doGetMallocated()
 
 extern ResponseStats g_rs;
 
-void registerAllStats()
+static void registerAllStats1()
 {
-  static std::atomic_flag s_init = ATOMIC_FLAG_INIT;
-  if(s_init.test_and_set())
-    return;
-
   addGetStat("questions", &g_stats.qcounter);
   addGetStat("ipv6-questions", &g_stats.ipv6qcounter);
   addGetStat("tcp-questions", &g_stats.tcpqcounter);
@@ -1231,6 +1229,10 @@ void registerAllStats()
 
   addGetStat("nod-lookups-dropped-oversize", &g_stats.nodLookupsDroppedOversize);
 
+  addGetStat("taskqueue-pushed",  []() { return getTaskPushes(); });
+  addGetStat("taskqueue-expired",  []() { return getTaskExpired(); });
+  addGetStat("taskqueue-size",  []() { return getTaskSize(); });
+  
   /* make sure that the ECS stats are properly initialized */
   SyncRes::clearECSStats();
   for (size_t idx = 0; idx < SyncRes::s_ecsResponsesBySubnetSize4.size(); idx++) {
@@ -1241,6 +1243,19 @@ void registerAllStats()
     const std::string name = "ecs-v6-response-bits-" + std::to_string(idx + 1);
     addGetStat(name, &(SyncRes::s_ecsResponsesBySubnetSize6.at(idx)));
   }
+}
+
+void registerAllStats()
+{
+  static std::once_flag s_once;
+  std::call_once(s_once, []() { try {
+        registerAllStats1();
+      }
+      catch (...) {
+        g_log << Logger::Critical << "Could not add stat entries" << endl;
+        exit(1);
+      }
+  });
 }
 
 void doExitGeneric(bool nicely)
@@ -1663,7 +1678,6 @@ static string clearDontThrottleNetmasks(T begin, T end) {
   g_log<<Logger::Info<<ret<<", requested via control channel"<<endl;
   return ret + "\n";
 }
-
 
 string RecursorControlParser::getAnswer(const string& question, RecursorControlParser::func_t** command)
 {

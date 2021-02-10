@@ -4,6 +4,7 @@
 #include "base32.hh"
 #include "lua-recursor4.hh"
 #include "root-dnssec.hh"
+#include "rec-taskqueue.hh"
 #include "test-syncres_cc.hh"
 
 RecursorStats g_stats;
@@ -74,7 +75,7 @@ LWResult::Result asyncresolve(const ComboAddress& ip, const DNSName& domain, int
 
 #include "root-addresses.hh"
 
-bool primeHints(void)
+bool primeHints(time_t now)
 {
   vector<DNSRecord> nsset;
   if (!g_recCache)
@@ -87,7 +88,7 @@ bool primeHints(void)
   arr.d_type = QType::A;
   aaaarr.d_type = QType::AAAA;
   nsrr.d_type = QType::NS;
-  arr.d_ttl = aaaarr.d_ttl = nsrr.d_ttl = time(nullptr) + 3600000;
+  arr.d_ttl = aaaarr.d_ttl = nsrr.d_ttl = now + 3600000;
 
   for (char c = 'a'; c <= 'm'; ++c) {
     char templ[40];
@@ -99,18 +100,18 @@ bool primeHints(void)
     arr.d_content = std::make_shared<ARecordContent>(ComboAddress(rootIps4[c - 'a']));
     vector<DNSRecord> aset;
     aset.push_back(arr);
-    g_recCache->replace(time(nullptr), DNSName(templ), QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true); // auth, nuke it all
+    g_recCache->replace(now, DNSName(templ), QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, g_rootdnsname); // auth, nuke it all
     if (rootIps6[c - 'a'] != NULL) {
       aaaarr.d_content = std::make_shared<AAAARecordContent>(ComboAddress(rootIps6[c - 'a']));
 
       vector<DNSRecord> aaaaset;
       aaaaset.push_back(aaaarr);
-      g_recCache->replace(time(nullptr), DNSName(templ), QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true);
+      g_recCache->replace(now, DNSName(templ), QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, g_rootdnsname);
     }
 
     nsset.push_back(nsrr);
   }
-  g_recCache->replace(time(nullptr), g_rootdnsname, QType(QType::NS), nsset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), false); // and stuff in the cache
+  g_recCache->replace(now, g_rootdnsname, QType(QType::NS), nsset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), false, g_rootdnsname); // and stuff in the cache
   return true;
 }
 
@@ -280,7 +281,7 @@ void computeRRSIG(const DNSSECPrivateKey& dpk, const DNSName& signer, const DNSN
     now = time(nullptr);
   }
   DNSKEYRecordContent drc = dpk.getDNSKEY();
-  const std::shared_ptr<DNSCryptoKeyEngine> rc = dpk.getKey();
+  const auto& rc = dpk.getKey();
 
   rrc.d_type = signQType;
   rrc.d_labels = signQName.countLabels() - signQName.isWildcard();
@@ -469,7 +470,7 @@ LWResult::Result genericDSAndDNSKEYHandler(LWResult* res, const DNSName& domain,
         /* sign the SOA */
         addRRSIG(keys, res->d_records, auth, 300, false, boost::none, boost::none, now);
         /* add a NSEC denying the DS */
-        std::set<uint16_t> types = {nsec3 ? QType::NSEC : QType::NSEC3};
+        std::set<uint16_t> types = {QType::RRSIG};
         if (proveCut) {
           types.insert(QType::NS);
         }
@@ -491,7 +492,7 @@ LWResult::Result genericDSAndDNSKEYHandler(LWResult* res, const DNSName& domain,
   if (type == QType::DNSKEY) {
     setLWResult(res, 0, true, false, true);
     addDNSKEY(keys, domain, 300, res->d_records);
-    addRRSIG(keys, res->d_records, domain, 300);
+    addRRSIG(keys, res->d_records, domain, 300, false, boost::none, boost::none, now);
     return LWResult::Result::Success;
   }
 
@@ -529,4 +530,8 @@ LWResult::Result basicRecordsForQnameMinimization(LWResult* res, const DNSName& 
     return LWResult::Result::Success;
   }
   return LWResult::Result::Timeout;
+}
+
+void pushTask(const DNSName& qname, uint16_t qtype, time_t deadline)
+{
 }

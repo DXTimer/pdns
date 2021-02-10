@@ -763,7 +763,7 @@ Examples::
 -------------------------------
 
 -  Boolean
--  Default: no
+-  Default: yes
 
 Fail to start if one or more of the
 :ref:`setting-local-address`'s do not exist on this server.
@@ -1282,6 +1282,21 @@ Maximum number of milliseconds to queue a query. See :doc:`performance`.
 
 Number of receiver (listening) threads to start. See :doc:`performance`.
 
+.. _setting-resolver:
+
+``resolver``
+------------
+
+-  IP Address with optional port
+-  Default: unset
+
+Recursive DNS server to use for ALIAS lookups and the internal stub resolver. Only one address can be given.
+
+Examples::
+
+  resolver=127.0.0.1
+  resolver=[::1]:5300
+
 .. _setting-retrieval-threads:
 
 ``retrieval-threads``
@@ -1427,7 +1442,7 @@ checking for updates to zones.
 -  Default: no
 
 This setting will make PowerDNS renotify the slaves after an AXFR is
-*received* from a master. This is useful when using when running a
+*received* from a master. This is useful when running a
 signing-slave.
 
 See :ref:`metadata-slave-renotify` to set this per-zone.

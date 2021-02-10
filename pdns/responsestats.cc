@@ -63,10 +63,8 @@ map<uint16_t, uint64_t> ResponseStats::getQTypeResponseCounts()
 map<uint16_t, uint64_t> ResponseStats::getSizeResponseCounts()
 {
   map<uint16_t, uint64_t> ret;
-  for(sizecounters_t::const_iterator iter = d_sizecounters.begin();
-      iter != d_sizecounters.end();
-      ++iter) {
-    ret[iter->first]=iter->second;
+  for(const auto & sizecounter : d_sizecounters) {
+    ret[sizecounter.first]=sizecounter.second;
   }
   return ret;
 }
