@@ -10,6 +10,7 @@ Generic MySQL backend
 * DNSSEC: Yes (set ``gmysql-dnssec``)
 * Disabled data: Yes
 * Comments: Yes
+* Zone caching: Yes
 * Module name: gmysql
 * Launch name: ``gmysql``
 
@@ -52,6 +53,13 @@ differences in data between replicated servers. See `"Setting
 The Binary Log
 Format" <http://dev.mysql.com/doc/refman/5.7/en/binary-log-setting.html>`__
 for more information.
+
+Otherwise, you will probably see:
+
+::
+
+  Cannot execute statement: impossible to write to binary log since BINLOG_FORMAT = STATEMENT and at least one table uses a storage engine limited to row-based logging.
+  InnoDB is limited to row-logging when transaction isolation level is READ COMMITTED or READ UNCOMMITTED.
 
 Settings
 --------
@@ -128,7 +136,6 @@ Use the InnoDB READ-COMMITTED transaction isolation level. Default: yes.
 
 ``gmysql-ssl``
 ^^^^^^^^^^^^^^^^^^
-.. versionadded:: 4.2.1
 
 Send the CLIENT_SSL capability flag to the server. SSL support is announced by the server via CLIENT_SSL and is enabled if the client returns the same capability. Default: no.
 
@@ -144,7 +151,6 @@ server. A value of 0 will disable the timeout. Default: 10
 
 ``gmysql-thread-cleanup``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
-.. versionadded:: 4.1.8
 
 Older versions (such as those shipped on RHEL 7) of the MySQL/MariaDB client libraries leak memory unless applications explicitly report the end of each thread to the library. Enabling ``gmysql-thread-cleanup`` tells PowerDNS to call ``mysql_thread_end()`` whenever a thread ends.
 
@@ -153,6 +159,7 @@ Only enable this if you are certain you need to. For more discussion, see https:
 Default Schema
 --------------
 
-This is the 4.3 schema. Please find `the 4.2 schema <https://github.com/PowerDNS/pdns/blob/rel/auth-4.2.x/modules/gmysqlbackend/schema.mysql.sql>`_ and `the 4.1 schema <https://github.com/PowerDNS/pdns/blob/rel/auth-4.1.x/modules/gmysqlbackend/schema.mysql.sql>`_ on GitHub.
+This is the 4.3 schema.
+The `4.2 schema <https://github.com/PowerDNS/pdns/blob/rel/auth-4.2.x/modules/gmysqlbackend/schema.mysql.sql>`_ and `the 4.1 schema <https://github.com/PowerDNS/pdns/blob/rel/auth-4.1.x/modules/gmysqlbackend/schema.mysql.sql>`_ are available on GitHub.
 
 .. literalinclude:: ../../modules/gmysqlbackend/schema.mysql.sql

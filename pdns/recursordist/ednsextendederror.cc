@@ -20,9 +20,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include "ednsextendederror.hh"
-#include "views.hh"
 
-static bool getEDNSExtendedErrorOptFromString(const pdns_string_view option, EDNSExtendedError& eee)
+static bool getEDNSExtendedErrorOptFromStringView(const pdns_string_view& option, EDNSExtendedError& eee)
 {
   if (option.size() < sizeof(uint16_t)) {
     return false;
@@ -38,12 +37,12 @@ static bool getEDNSExtendedErrorOptFromString(const pdns_string_view option, EDN
 
 bool getEDNSExtendedErrorOptFromString(const string& option, EDNSExtendedError& eee)
 {
-  return getEDNSExtendedErrorOptFromString(pdns_string_view(option), eee);
+  return getEDNSExtendedErrorOptFromStringView(pdns_string_view(option), eee);
 }
 
 bool getEDNSExtendedErrorOptFromString(const char* option, unsigned int len, EDNSExtendedError& eee)
 {
-  return getEDNSExtendedErrorOptFromString(pdns_string_view(option, len), eee);
+  return getEDNSExtendedErrorOptFromStringView(pdns_string_view(option, len), eee);
 }
 
 string makeEDNSExtendedErrorOptString(const EDNSExtendedError& eee)

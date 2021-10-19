@@ -1,5 +1,177 @@
 Changelogs for 4.4.x
 ====================
+
+.. changelog::
+  :version: 4.4.3
+  :released: 31st of March 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10240
+    :tickets: 10238
+
+    More fail-safe handling of Newly Discovered Domain files.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10227
+    :tickets: 10111
+
+    Handle policy (if needed) after postresolve.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10226
+    :tickets: 10064
+
+    Return current rcode instead of 0 if there are no CNAME records to follow.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10224
+    :tickets: 9883
+
+    Lookup DS entries before CNAME entries.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10221
+    :tickets: 9856
+
+    Use a short-lived NSEC3 hashes cache for denial validation.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10199
+    :tickets: 9812
+
+    Handle failure to start the web server more gracefully.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10197
+    :tickets: 9970
+
+    Test that we correctly cap the answer's TTL in expanded wildcard cases.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10194
+    :tickets: 9793
+
+    Fix the gathering of denial proof for wildcard-expanded answers.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10192
+    :tickets: 10185
+
+    Make sure we take the right minimum for the packet cache TTL data in the SERVFAIL case.
+
+  .. change::
+    :tags: Enhancement
+    :pullreq: 10062
+
+    Pull in libfstrm for el8 build.
+
+.. changelog::
+  :version: 4.4.2
+  :released: 14th of December 2020
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9837
+
+    UUID: Use the non-cryptographic variant of the boost::uuid.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9838
+
+    Keep a cached, valid entry over a fresher Bogus one.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9799
+    :tickets: 9574
+
+    Ensure socket-dir matches runtime directory on old systemd
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9825
+    :tickets: 9807
+
+    Untangle the validation/resolving qnames and qtypes.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9821
+    :tickets: 9597
+
+    Move to several distinct Bogus states, for easier debugging.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9805
+    :tickets: 9790
+
+    Do not chase CNAME during qname minimization step 4.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9774
+    :tickets: 9766
+
+    APL records: fix endianness problem.
+
+.. changelog::
+  :version: 4.4.1
+  :released: 25th of November 2020
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9719
+    :tickets: 9707
+
+    Do not add request to a wait chain that's already processed or being processed.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 9687
+    :tickets: 9651
+
+    Allow to specify a name in getMetric() that is used for Prometheus export only.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9710
+    :tickets: 9696
+
+    Avoid a CNAME loop detection issue with DNS64
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9705
+    :tickets: 9697
+
+    Do not send overly long NOD lookups.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9683
+    :tickets: 9680
+
+    If a.b.c CNAME x.a.b.c is encountered, switch off QName Minimization.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 9682
+    :tickets: 9679
+
+    Fix the processing of answers generated from gettag.
+
+
 .. changelog::
   :version: 4.4.0
   :released: 19th of October 2020

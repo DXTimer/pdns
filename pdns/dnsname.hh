@@ -33,8 +33,7 @@
 
 #include <boost/version.hpp>
 
-// it crashes on OSX and doesn't compile on OpenBSD
-#if BOOST_VERSION >= 105300 && ! defined( __APPLE__ ) && ! defined(__OpenBSD__)
+#if BOOST_VERSION >= 105300
 #include <boost/container/string.hpp>
 #endif
 
@@ -158,7 +157,7 @@ public:
   inline bool canonCompare(const DNSName& rhs) const;
   bool slowCanonCompare(const DNSName& rhs) const;  
 
-#if BOOST_VERSION >= 105300 && ! defined( __APPLE__ ) && ! defined(__OpenBSD__)
+#if BOOST_VERSION >= 105300
   typedef boost::container::string string_t;
 #else
   typedef std::string string_t;
@@ -288,53 +287,61 @@ struct SuffixMatchTree
 
   template<typename V>
   void visit(const V& v) const {
-    for(const auto& c : children)
+    for(const auto& c : children) {
       c.visit(v);
-    if(endNode)
+    }
+
+    if (endNode) {
       v(*this);
+    }
   }
 
-  void add(const DNSName& name, const T& t)
+  void add(const DNSName& name, T&& t)
   {
-    add(name.getRawLabels(), t);
+    auto labels = name.getRawLabels();
+    add(labels, std::move(t));
   }
 
-  void add(std::vector<std::string> labels, const T& value) const
+  void add(std::vector<std::string>& labels, T&& value) const
   {
-    if(labels.empty()) { // this allows insertion of the root
-      endNode=true;
-      d_value=value;
+    if (labels.empty()) { // this allows insertion of the root
+      endNode = true;
+      d_value = std::move(value);
     }
     else if(labels.size()==1) {
-      auto res=children.emplace(*labels.begin(), true);
-      if(!res.second) {
+      auto res = children.emplace(*labels.begin(), true);
+      if (!res.second) {
         // we might already have had the node as an
         // intermediary one, but it's now an end node
-        if(!res.first->endNode) {
+        if (!res.first->endNode) {
           res.first->endNode = true;
         }
       }
-      res.first->d_value = value;
+      res.first->d_value = std::move(value);
     }
     else {
-      auto res=children.emplace(*labels.rbegin(), false);
+      auto res = children.emplace(*labels.rbegin(), false);
       labels.pop_back();
-      res.first->add(labels, value);
+      res.first->add(labels, std::move(value));
     }
   }
 
-  void remove(const DNSName &name) const
+  void remove(const DNSName &name, bool subtree=false) const
   {
-    remove(name.getRawLabels());
+    auto labels = name.getRawLabels();
+    remove(labels, subtree);
   }
 
   /* Removes the node at `labels`, also make sure that no empty
    * children will be left behind in memory
    */
-  void remove(std::vector<std::string> labels) const
+  void remove(std::vector<std::string>& labels, bool subtree = false) const
   {
     if (labels.empty()) { // this allows removal of the root
       endNode = false;
+      if (subtree) {
+        children.clear();
+      }
       return;
     }
 
@@ -351,6 +358,10 @@ struct SuffixMatchTree
       // The child is no longer an endnode
       child->endNode = false;
 
+      if (subtree) {
+        child->children.clear();
+      }
+
       // If the child has no further children, just remove it from the set.
       if (child->children.empty()) {
         children.erase(child);
@@ -364,28 +375,32 @@ struct SuffixMatchTree
 
   T* lookup(const DNSName& name)  const
   {
-    if(children.empty()) { // speed up empty set
-      if(endNode)
+    if (children.empty()) { // speed up empty set
+      if (endNode) {
         return &d_value;
+      }
       return nullptr;
     }
 
-    return lookup(name.getRawLabels());
+    auto labels = name.getRawLabels();
+    return lookup(labels);
   }
 
-  T* lookup(std::vector<std::string> labels) const
+  T* lookup(std::vector<std::string>& labels) const
   {
-    if(labels.empty()) { // optimization
-      if(endNode)
+    if (labels.empty()) { // optimization
+      if (endNode) {
         return &d_value;
+      }
       return nullptr;
     }
 
     SuffixMatchTree smn(*labels.rbegin());
     auto child = children.find(smn);
-    if(child == children.end()) {
-      if(endNode)
+    if (child == children.end()) {
+      if(endNode) {
         return &d_value;
+      }
       return nullptr;
     }
     labels.pop_back();
@@ -404,6 +419,7 @@ struct SuffixMatchTree
     }
     for (const auto& child : children) {
       auto nodes = child.getNodes();
+      ret.reserve(ret.size() + nodes.size());
       for (const auto &node: nodes) {
         ret.push_back(node + DNSName(d_name));
       }

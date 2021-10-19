@@ -3,7 +3,7 @@ import dns
 import clientsubnetoption
 from dnsdisttests import DNSDistTest
 
-class TestBasics(DNSDistTest):
+class TestTags(DNSDistTest):
 
     _config_template = """
     newServer{address="127.0.0.1:%s"}
@@ -13,10 +13,10 @@ class TestBasics(DNSDistTest):
     end
     addAction(AllRule(), LuaAction(lol))
 
-    addAction("tag-me-dns-1.tags.tests.powerdns.com.", TagAction("dns", "value1"))
-    addAction("tag-me-dns-2.tags.tests.powerdns.com.", TagAction("dns", "value2"))
-    addAction("tag-me-response-1.tags.tests.powerdns.com.", TagAction("response", "value1"))
-    addAction("tag-me-response-2.tags.tests.powerdns.com.", TagAction("response", "value2"))
+    addAction("tag-me-dns-1.tags.tests.powerdns.com.", SetTagAction("dns", "value1"))
+    addAction("tag-me-dns-2.tags.tests.powerdns.com.", SetTagAction("dns", "value2"))
+    addAction("tag-me-response-1.tags.tests.powerdns.com.", SetTagAction("response", "value1"))
+    addAction("tag-me-response-2.tags.tests.powerdns.com.", SetTagAction("response", "value2"))
 
     addAction(TagRule("not-dns"), SpoofAction("1.2.3.4"))
     addAction(TagRule("dns", "value1"), SpoofAction("1.2.3.50"))
@@ -36,7 +36,7 @@ class TestBasics(DNSDistTest):
     addResponseAction(TagRule("response", "value1"), LuaResponseAction(responseHandlerSetTC))
     addResponseAction(TagRule("response", "no-match-value"), DropResponseAction())
 
-    addResponseAction("tag-me-response-3.tags.tests.powerdns.com.", TagResponseAction("response-tag", "value"))
+    addResponseAction("tag-me-response-3.tags.tests.powerdns.com.", SetTagResponseAction("response-tag", "value"))
     addResponseAction(TagRule("response-tag"), LuaResponseAction(responseHandlerUnsetQR))
     """
 
@@ -60,8 +60,8 @@ class TestBasics(DNSDistTest):
             self.assertTrue(receivedQuery)
             self.assertTrue(receivedResponse)
             receivedQuery.id = query.id
-            self.assertEquals(query, receivedQuery)
-            self.assertEquals(response, receivedResponse)
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(response, receivedResponse)
 
     def testQuestionMatchTagAndValue(self):
         """
@@ -83,7 +83,7 @@ class TestBasics(DNSDistTest):
             sender = getattr(self, method)
             (_, receivedResponse) = sender(query, response=None, useQueue=False)
             self.assertTrue(receivedResponse)
-            self.assertEquals(expectedResponse, receivedResponse)
+            self.assertEqual(expectedResponse, receivedResponse)
 
     def testQuestionMatchTagOnly(self):
         """
@@ -105,7 +105,7 @@ class TestBasics(DNSDistTest):
             sender = getattr(self, method)
             (_, receivedResponse) = sender(query, response=None, useQueue=False)
             self.assertTrue(receivedResponse)
-            self.assertEquals(expectedResponse, receivedResponse)
+            self.assertEqual(expectedResponse, receivedResponse)
 
     def testResponseNoMatch(self):
         """
@@ -127,8 +127,8 @@ class TestBasics(DNSDistTest):
             self.assertTrue(receivedQuery)
             self.assertTrue(receivedResponse)
             receivedQuery.id = query.id
-            self.assertEquals(query, receivedQuery)
-            self.assertEquals(response, receivedResponse)
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(response, receivedResponse)
 
     def testResponseMatchTagAndValue(self):
         """
@@ -156,8 +156,8 @@ class TestBasics(DNSDistTest):
             self.assertTrue(receivedQuery)
             self.assertTrue(receivedResponse)
             receivedQuery.id = query.id
-            self.assertEquals(query, receivedQuery)
-            self.assertEquals(expectedResponse, receivedResponse)
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(expectedResponse, receivedResponse)
 
     def testResponseMatchResponseTagMatches(self):
         """
@@ -185,5 +185,5 @@ class TestBasics(DNSDistTest):
             self.assertTrue(receivedQuery)
             self.assertTrue(receivedResponse)
             receivedQuery.id = query.id
-            self.assertEquals(query, receivedQuery)
-            self.assertEquals(expectedResponse, receivedResponse)
+            self.assertEqual(query, receivedQuery)
+            self.assertEqual(expectedResponse, receivedResponse)

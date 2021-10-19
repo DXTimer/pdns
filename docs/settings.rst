@@ -22,8 +22,6 @@ means ``yes``.
 -  Boolean
 -  Default: no
 
-.. versionadded:: 4.0.0
-
 Allow 8 bit DNS queries.
 
 .. _setting-allow-axfr-ips:
@@ -63,20 +61,19 @@ Allow DNS updates from these IP ranges. Set to empty string to honour ``ALLOW-DN
 Allow AXFR NOTIFY from these IP ranges. Setting this to an empty string
 will drop all incoming notifies.
 
-.. _setting-allow-recursion:
+.. _setting-allow-unsigned-autoprimary:
 
-``allow-recursion``
--------------------
+``allow-unsigned-autoprimary``
+------------------------------
 
--  IP ranges, separated by commas
--  Default: 0.0.0.0/0
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-allow-unsigned-supermaster` before 4.5.0.
 
-.. deprecated:: 4.1.0
-  Recursion has been removed, see :doc:`guides/recursion`
+-  Boolean
+-  Default: yes
 
-By specifying ``allow-recursion``, recursion can be restricted to
-netmasks specified. The default is to allow recursion from everywhere.
-Example: ``allow-recursion=198.51.100.0/24, 10.0.0.0/8, 192.0.2.4``.
+Turning this off requires all autoprimary notifications to be signed by
+valid TSIG signature. It will accept any existing key on slave.
 
 .. _setting-allow-unsigned-notify:
 
@@ -86,8 +83,6 @@ Example: ``allow-recursion=198.51.100.0/24, 10.0.0.0/8, 192.0.2.4``.
 -  Boolean
 -  Default: yes
 
-.. versionadded:: 4.0.0
-
 Turning this off requires all notifications that are received to be
 signed by valid TSIG signature for the zone.
 
@@ -96,13 +91,8 @@ signed by valid TSIG signature for the zone.
 ``allow-unsigned-supermaster``
 ------------------------------
 
--  Boolean
--  Default: yes
-
-.. versionadded:: 4.0.0
-
-Turning this off requires all supermaster notifications to be signed by
-valid TSIG signature. It will accept any existing key on slave.
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-allow-unsigned-autoprimary`.
 
 .. _setting-also-notify:
 
@@ -111,7 +101,7 @@ valid TSIG signature. It will accept any existing key on slave.
 
 -  IP addresses, separated by commas
 
-When notifying a domain, also notify these nameservers. Example:
+When notifying a zone, also notify these nameservers. Example:
 ``also-notify=192.0.2.1, 203.0.113.167``. The IP addresses listed in
 ``also-notify`` always receive a notification. Even if they do not match
 the list in :ref:`setting-only-notify`.
@@ -123,9 +113,6 @@ the list in :ref:`setting-only-notify`.
 
 -  Boolean
 -  Default: yes
-
-.. versionchanged:: 4.0.1
-  was 'no' before.
 
 Answer questions for the ANY on UDP with a truncated packet that refers
 the remote server to TCP. Useful for mitigating reflection attacks.
@@ -147,23 +134,20 @@ Enable/disable the :doc:`http-api/index`.
 
 -  String
 
-.. versionadded:: 4.0.0
-
 Static pre-shared authentication key for access to the REST API.
 
-.. _setting-api-readonly:
+.. _setting-autosecondary:
 
-``api-readonly``
-----------------
+``autosecondary``
+-----------------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-superslave` before 4.5.0.
 
 -  Boolean
 -  Default: no
 
-.. versionadded:: 4.0.0
-.. versionchanged:: 4.2.0
-  This setting has been removed in 4.2.0.
-
-Disallow data modification through the REST API when set.
+Turn on autosecondary support. See :ref:`autoprimary-operation`.
 
 .. _setting-axfr-fetch-timeout:
 
@@ -185,8 +169,6 @@ Maximum time in seconds for inbound AXFR to start or be idle after starting.
 -  Boolean
 -  Default: no
 
-.. versionadded:: 4.0.4
-
 Also AXFR a zone from a master with a lower serial.
 
 .. _setting-cache-ttl:
@@ -206,8 +188,6 @@ Seconds to store packets in the :ref:`packet-cache`. A value of 0 will disable t
 
 -  String
 -  Default: auth
-
-.. versionadded:: 4.2.0
 
 Set the instance or third string of the metric key. Be careful not to include
 any dots in this setting, unless you know what you are doing.
@@ -231,8 +211,6 @@ See :ref:`metricscarbon`.
 
 -  String
 -  Default: pdns
-
-.. versionadded:: 4.2.0
 
 Set the namespace or first string of the metric key. Be careful not to include
 any dots in this setting, unless you know what you are doing.
@@ -313,15 +291,17 @@ Name of this virtual configuration - will rename the binary image. See
 -----------------------
 
 -  Boolean
--  Default: no
+-  Default: yes
 
 .. versionadded:: 4.4.0
 
-When this is set, PowerDNS assumes that any single domain lives in only one backend.
+When this is set, PowerDNS assumes that any single zone lives in only one backend.
 This allows PowerDNS to send ANY lookups to its backends, instead of sometimes requesting the exact needed type.
 This reduces the load on backends by retrieving all the types for a given name at once, adding all of them to the cache.
 It improves performance significantly for latency-sensitive backends, like SQL ones, where a round-trip takes serious time.
-This behaviour will be enabled by default in a future release.
+
+.. note::
+  Pre 4.5.0 the default was no.
 
 .. _setting-control-console:
 
@@ -347,8 +327,6 @@ Operate as a daemon.
 -  Boolean
 -  Default: yes
 
-.. versionadded:: 4.2.0
-
 The value of :ref:`metadata-api-rectify` if it is not set on the zone.
 
 .. note::
@@ -362,9 +340,6 @@ The value of :ref:`metadata-api-rectify` if it is not set on the zone.
 
 -  String
 -  Default: ecdsa256
-
-.. versionchanged:: 4.1.0
-  Renamed from ``default-ksk-algorithms``. No longer supports multiple algorithm names.
 
 The algorithm that should be used for the KSK when running
 :doc:`pdnsutil secure-zone <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
@@ -498,9 +473,6 @@ TTL to use when none is provided.
 -  String
 -  Default: (empty)
 
-.. versionchanged:: 4.1.0
-  Renamed from ``default-zsk-algorithms``. Does no longer support multiple algorithm names.
-
 The algorithm that should be used for the ZSK when running
 :doc:`pdnsutil secure-zone <manpages/pdnsutil.1>` or using the :doc:`Zone API endpoint <http-api/cryptokey>`
 to enable DNSSEC. Must be one of:
@@ -576,19 +548,6 @@ inside a supervisor that handles logging (like systemd).
   Do not use this setting in combination with :ref:`setting-daemon` as all
   logging will disappear.
 
-.. _setting-disable-tcp:
-
-``disable-tcp``
----------------
-
--  Boolean
--  Default: no
-
-.. versionchanged:: 4.2.0
-  This setting has been removed
-
-Do not listen to TCP queries. Breaks RFC compliance.
-
 .. _setting-distributor-threads:
 
 ``distributor-threads``
@@ -608,8 +567,11 @@ See :doc:`performance`.
 -  Boolean
 -  Default: no
 
-Synthesise CNAME records from DNAME records as required. This
-approximately doubles query load. **Do not combine with DNSSEC!**
+Turn on DNAME processing (DNAME substitution, CNAME synthesis). This
+approximately doubles query load.
+
+If this is turned off, DNAME records are treated as any other and served
+only when queried explicitly.
 
 .. _setting-dnssec-key-cache-ttl:
 
@@ -651,10 +613,10 @@ ADDITIONAL section when sending a referral.
 ``domain-metadata-cache-ttl``
 -----------------------------
 
--  Integer
--  Default: 60
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-zone-metadata-cache-ttl`.
 
-Seconds to cache domain metadata from the database. A value of 0
+Seconds to cache zone metadata from the database. A value of 0
 disables caching.
 
 .. _setting-edns-subnet-processing:
@@ -674,8 +636,6 @@ Enables EDNS subnet processing, for backends that support it.
 
 -  One of ``no``, ``yes`` (or empty), or ``shared``, String
 -  Default: no
-
-.. versionadded:: 4.2.0
 
 Globally enable the :doc:`LUA records <lua-records/index>` feature.
 
@@ -698,8 +658,6 @@ Entropy source file to use.
 
 -  Boolean
 -  Default: no
-
-.. versionadded:: 4.1.0
 
 If this is enabled, ALIAS records are expanded (synthesized to their
 A/AAAA).
@@ -748,6 +706,21 @@ or slave settings.
 -  Default: no
 
 Run within a guardian process. See :ref:`running-guardian`.
+
+.. _setting-ignore-unknown-settings:
+
+``ignore-unknown-settings``
+---------------------------
+
+.. versionadded:: 4.5.0
+
+-  Setting names, separated by commas
+-  Default: empty
+
+Names of settings to be ignored while parsing configuration files, if the setting
+name is unknown to PowerDNS.
+
+Useful during upgrade testing.
 
 .. _setting-include-dir:
 
@@ -834,7 +807,7 @@ Examples::
 -------------------------------
 
 -  Boolean
--  Default: no
+-  Default: yes
 
 Fail to start if one or more of the
 :ref:`setting-local-address`'s do not exist on this server.
@@ -843,15 +816,8 @@ Fail to start if one or more of the
 
 ``local-ipv6``
 --------------
-.. deprecated:: 4.3.0
-  This setting has been deprecated, use :ref:`setting-local-address`
-
--  IPv6 Addresses, separated by commas or whitespace
--  Default: ``::``
-
-Local IPv6 address to which we bind. It is highly advised to bind to
-specific interfaces and not use the default 'bind to any'. This causes
-big problems if you have multiple IP addresses.
+.. deprecated:: 4.5.0
+   Use :ref:`setting-local-address` instead
 
 .. _setting-local-ipv6-nonexist-fail:
 
@@ -909,8 +875,6 @@ to at least 5 to see the logs.
 - Bool
 - Default: yes
 
-.. versionadded:: 4.1.0
-
 When printing log lines to stdout, prefix them with timestamps.
 Disable this if the process supervisor timestamps these lines already.
 
@@ -943,8 +907,6 @@ e.g. error = 3, warning = 4, notice = 5, info = 6
 
 -  String
 -  Default: empty
-
-.. versionadded:: 4.1.0
 
 Script to be used to edit incoming AXFRs, see :ref:`modes-of-operation-axfrfilter`
 
@@ -1011,6 +973,9 @@ Setting this to any value less than or equal to 0 will set no limit.
 ``master``
 ----------
 
++.. deprecated:: 4.5.0
++  Renamed to :ref:`setting-primary`.
+ 
 -  Boolean
 -  Default: no
 
@@ -1023,11 +988,6 @@ Turn on master support. See :ref:`master-operation`.
 
 -  Integer
 -  Default: 1000000
-
-.. versionchanged:: 4.1.0
-  The packet and query caches are distinct. Previously, this setting was used for
-  both the packet and query caches. See :ref:`setting-max-packet-cache-entries` for
-  the packet-cache setting.
 
 Maximum number of entries in the query cache. 1 million (the default)
 will generally suffice for most installations.
@@ -1048,8 +1008,6 @@ protection measure to avoid database explosion due to long names.
 ``max-generate-steps``
 ----------------------
 
-.. versionadded:: 4.3.0
-
 -  Integer
 -  Default: 0
 
@@ -1064,10 +1022,13 @@ means unlimited.
 ------------------------
 
 -  Integer
--  Default: 500
+-  Default: 100
 
 Limit the number of NSEC3 hash iterations for zone configurations.
 For more information see :ref:`dnssec-operational-nsec-modes-params`.
+
+.. note::
+  Pre 4.5.0 the default was 500.
 
 .. _setting-max-packet-cache-entries:
 
@@ -1076,8 +1037,6 @@ For more information see :ref:`dnssec-operational-nsec-modes-params`.
 
 -  Integer
 -  Default: 1000000
-
-.. versionadded:: 4.1.0
 
 Maximum number of entries in the packet cache. 1 million (the default)
 will generally suffice for most installations.
@@ -1101,7 +1060,9 @@ situation hopeless and respawn.
 -  Integer
 -  Default: 2^31-1 (on most systems), 2^63-1 (on ILP64 systems)
 
-Maximum number of signatures cache entries
+Maximum number of DNSSEC signature cache entries. This cache is
+automatically reset once per week or when the cache is full. If you
+use NSEC narrow mode, this cache can grow large.
 
 .. _setting-max-tcp-connection-duration:
 
@@ -1218,7 +1179,7 @@ the NS records. By specifying networks/mask as whitelist, the targets
 can be limited. The default is to notify the world. To completely
 disable these NOTIFYs set ``only-notify`` to an empty value. Independent
 of this setting, the IP addresses or netmasks configured with
-:ref:`setting-also-notify` and ``ALSO-NOTIFY`` domain metadata
+:ref:`setting-also-notify` and ``ALSO-NOTIFY`` zone metadata
 always receive AXFR NOTIFYs.
 
 IP addresses and netmasks can be excluded by prefixing them with a ``!``.
@@ -1235,7 +1196,7 @@ To notify all IP addresses apart from the 192.168.0.0/24 subnet use the followin
   method to distribute the zone data to the slaves), then set
   :ref:`setting-only-notify` to an empty value and specify the notification targets
   explicitly using :ref:`setting-also-notify` and/or
-  :ref:`metadata-also-notify` domain metadata to avoid this potential bottleneck.
+  :ref:`metadata-also-notify` zone metadata to avoid this potential bottleneck.
 
 .. note::
   If your slaves support an Internet Protocol version, which your master does not,
@@ -1248,25 +1209,6 @@ To notify all IP addresses apart from the 192.168.0.0/24 subnet use the followin
   .. code-block:: ini
 
     only-notify=0.0.0.0/0
-
-.. _setting-out-of-zone-additional-processing:
-
-``out-of-zone-additional-processing``
--------------------------------------
-
--  Boolean
--  Default: yes
-
-.. deprecated:: 4.2.0
-  This setting has been removed.
-
-Do out of zone additional processing. This means that if a malicious
-user adds a '.com' zone to your server, it is not used for other domains
-and will not contaminate answers. Do not enable this setting if you run
-a public DNS service with untrusted users.
-
-The docs had previously indicated that the default was "no", but the
-default has been "yes" since 2005.
 
 .. _setting-outgoing-axfr-expand-alias:
 
@@ -1308,6 +1250,19 @@ itself in master mode. In very complicated situations we could guess
 wrong and not notify a server that should be notified. In that case, set
 prevent-self-notification to "no".
 
+.. _setting-primary:
+
+``primary``
+-----------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-master` before 4.5.0.
+
+-  Boolean
+-  Default: no
+
+Turn on operating as a primary. See :ref:`primary-operation`.
+
 .. _setting-query-cache-ttl:
 
 ``query-cache-ttl``
@@ -1343,14 +1298,8 @@ the network).
 
 ``query-local-address6``
 ------------------------
-.. deprecated:: 4.4.0
-  Use :ref:`setting-query-local-address`. The default has been changed
-  from '::' to unset.
-
--  IPv6 Address
--  Default: unset
-
-Source IP address for sending IPv6 queries.
+.. deprecated:: 4.5.0
+  Removed. Use :ref:`setting-query-local-address`.
 
 .. _setting-query-logging:
 
@@ -1383,43 +1332,20 @@ Maximum number of milliseconds to queue a query. See :doc:`performance`.
 
 Number of receiver (listening) threads to start. See :doc:`performance`.
 
-.. _setting-recursive-cache-ttl:
-
-``recursive-cache-ttl``
------------------------
-
--  Integer
--  Default: 10
-
-.. deprecated:: 4.1.0
-  Recursion has been removed, see :doc:`guides/recursion`
-
-Seconds to store recursive packets in the :ref:`packet-cache`.
-
-.. _setting-recursor:
-
-``recursor``
-------------
-
--  IP Address
-
-.. deprecated:: 4.1.0
-  Recursion has been removed, see :doc:`guides/recursion`
-
-If set, recursive queries will be handed to the recursor specified here.
-
 .. _setting-resolver:
 
 ``resolver``
 ------------
 
--  IP Addresses with optional port, separated by commas
+-  IP Address with optional port
+-  Default: unset
 
-.. versionadded:: 4.1.0
+Recursive DNS server to use for ALIAS lookups and the internal stub resolver. Only one address can be given.
 
-Use these resolver addresses for ALIAS and the internal stub resolver.
-If this is not set, ``/etc/resolv.conf`` is parsed for upstream
-resolvers.
+Examples::
+
+  resolver=127.0.0.1
+  resolver=[::1]:5300
 
 .. _setting-retrieval-threads:
 
@@ -1470,6 +1396,36 @@ Specify which random number generator to use. Permissible choices are:
 .. note::
   Not all choices are available on all systems.
 
+.. _setting-secondary:
+
+``secondary``
+-------------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-slave` before 4.5.0.
+
+-  Boolean
+-  Default: no
+
+Turn on operating as a secondary. See :ref:`secondary-operation`.
+
+.. _setting-secondary-do-renotify:
+
+``secondary-do-renotify``
+-------------------------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-slave-renotify` before 4.5.0.
+
+-  Boolean
+-  Default: no
+
+This setting will make PowerDNS renotify the secondaries after an AXFR is
+*received* from a primary. This is useful, among other situations, when running a
+signing secondary.
+
+See :ref:`metadata-slave-renotify` to set this per-zone.
+
 .. _setting-security-poll-suffix:
 
 ``security-poll-suffix``
@@ -1478,7 +1434,7 @@ Specify which random number generator to use. Permissible choices are:
 -  String
 -  Default: secpoll.powerdns.com.
 
-Domain name from which to query security update notifications. Setting
+Zone name from which to query security update notifications. Setting
 this to an empty string disables secpoll.
 
 .. _setting-send-signed-notify:
@@ -1490,7 +1446,7 @@ this to an empty string disables secpoll.
 -  Default: yes
 
 If yes, outgoing NOTIFYs will be signed if a TSIG key is configured for the zone.
-If there are multiple TSIG keys configured for a domain, PowerDNS will use the
+If there are multiple TSIG keys configured for a zone, PowerDNS will use the
 first one retrieved from the backend, which may not be the correct one for the
 respective slave. Hence, in setups with multiple slaves with different TSIG keys
 it may be required to send NOTIFYs unsigned.
@@ -1539,34 +1495,30 @@ signing speed by changing this number.
 ``slave``
 ---------
 
--  Boolean
--  Default: no
-
-Turn on slave support. See :ref:`slave-operation`.
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-secondary`.
 
 .. _setting-slave-cycle-interval:
 
 ``slave-cycle-interval``
 ------------------------
 
--  Integer
--  Default: 60
-
-On a master, this is the amount of seconds between the master checking
-the SOA serials in its database to determine to send out NOTIFYs to the
-slaves. On slaves, this is the number of seconds between the slave
-checking for updates to zones.
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-xfr-cycle-interval`.
 
 .. _setting-slave-renotify:
 
 ``slave-renotify``
 ------------------
 
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-secondary-do-renotify`.
+
 -  Boolean
 -  Default: no
 
 This setting will make PowerDNS renotify the slaves after an AXFR is
-*received* from a master. This is useful when using when running a
+*received* from a master. This is useful when running a
 signing-slave.
 
 See :ref:`metadata-slave-renotify` to set this per-zone.
@@ -1643,17 +1595,23 @@ and :doc:`Virtual Hosting <guides/virtual-instances>` how this can differ.
 ``superslave``
 ---------------
 
+.. deprecated:: 4.5.0
+  Renamed to :ref:`setting-autosecondary`.
+
 -  Boolean
 -  Default: no
 
-.. versionadded:: 4.1.9
-  In versions before 4.1.9, this setting did not exist and supermaster support
-  was enabled by default.
-
-.. versionchanged:: 4.2.0
-  Before 4.2.0, the default was yes.
-
 Turn on supermaster support. See :ref:`supermaster-operation`.
+
+.. _setting-svc-autohints:
+
+``svc-autohints``
+-----------------
+
+- Boolean
+- Default: no
+
+Whether or not to enable IPv4 and IPv6 :ref:`autohints <svc-autohints>`.
 
 .. _setting-tcp-control-address:
 
@@ -1700,8 +1658,6 @@ Password for TCP control.
 -  Integer
 -  Default: 0 (Disabled)
 
-.. versionadded:: 4.1.0
-
 Enable TCP Fast Open support, if available, on the listening sockets.
 The numerical value supplied is used as the queue size, 0 meaning
 disabled.
@@ -1744,9 +1700,6 @@ IP ranges of incoming notification proxies.
 
 ``udp-truncation-threshold``
 ----------------------------
-.. versionchanged:: 4.2.0
-  Before 4.2.0, the default was 1680
-
 -  Integer
 -  Default: 1232
 
@@ -1776,6 +1729,8 @@ When this is disabled, records stored in this format cannot be served.
 
 Recommendation: keep disabled for better performance.
 Enable for testing PowerDNS upgrades, without changing stored records.
+Enable for upgrading record content on secondaries, or when using the API (see :doc:`upgrade notes <../upgrading>`).
+Disable after record contents have been upgraded.
 
 This option is supported by the bind and Generic SQL backends. 
 
@@ -1806,9 +1761,6 @@ can set this response to a custom value as well.
 
 Start a webserver for monitoring. See :doc:`performance`".
 
-.. versionchanged:: 4.1.0
-  It was necessary to enable the webserver to use the REST API, this is no longer the case.
-
 .. _setting-webserver-address:
 
 ``webserver-address``
@@ -1827,17 +1779,12 @@ IP Address for webserver/API to listen on.
 -  IP ranges, separated by commas or whitespace
 -  Default: 127.0.0.1,::1
 
-.. versionchanged:: 4.1.0
-
-    Default is now 127.0.0.1,::1, was 0.0.0.0/0,::/0 before.
-
 Webserver/API access is only allowed from these subnets.
 
 .. _setting-webserver-loglevel:
 
 ``webserver-loglevel``
 ----------------------
-.. versionadded:: 4.2.0
 
 -  String, one of "none", "normal", "detailed"
 
@@ -1878,7 +1825,6 @@ The value between the hooks is a UUID that is generated for each request. This c
 
 ``webserver-max-bodysize``
 --------------------------
-.. versionadded:: 4.2.0
 
 -  Integer
 -  Default: 2
@@ -1924,6 +1870,22 @@ If the webserver should print arguments.
 
 If a PID file should be written.
 
+.. _setting-xfr-cycle-interval:
+
+``xfr-cycle-interval``
+----------------------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-slave-cycle-interval` before 4.5.0.
+
+-  Integer
+-  Default: 60
+
+On a primary, this is the amount of seconds between the primary checking
+the SOA serials in its database to determine to send out NOTIFYs to the
+secondaries. On secondaries, this is the number of seconds between the secondary
+checking for updates to zones.
+
 .. _setting-xfr-max-received-mbytes:
 
 ``xfr-max-received-mbytes``
@@ -1935,3 +1897,29 @@ If a PID file should be written.
 Specifies the maximum number of received megabytes allowed on an
 incoming AXFR/IXFR update, to prevent resource exhaustion. A value of 0
 means no restriction.
+
+.. _setting-zone-cache-refresh-interval:
+
+``zone-cache-refresh-interval``
+-------------------------------
+
+-  Integer
+-  Default: 0
+
+Seconds to cache a list of all known zones. A value of 0 will disable the cache.
+
+If your backends do not respond to unknown or dynamically generated zones, it is suggested to enable :ref:`setting-consistent-backends` and set this option to `60`.
+
+.. _setting-zone-metadata-cache-ttl:
+
+``zone-metadata-cache-ttl``
+-----------------------------
+
+.. versionchanged:: 4.5.0
+  This was called :ref:`setting-domain-metadata-cache-ttl` before 4.5.0.
+
+-  Integer
+-  Default: 60
+
+Seconds to cache zone metadata from the database. A value of 0
+disables caching.

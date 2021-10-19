@@ -11,17 +11,23 @@ The DNSQuestion object contains at least the following fields:
   An object that contains everything about the current query.
   This object has the following attributes:
 
+  .. attribute:: DNSQuestion.addPaddingToResponse
+
+      .. versionadded:: 4.5.0
+
+      Whether the response will get EDNS Padding. See :ref:`setting-edns-padding-from` and :ref:`setting-edns-padding-mode`.
+
   .. attribute:: DNSQuestion.extendedErrorCode
 
       .. versionadded:: 4.5.0
 
-      The current extended error code, if any. See :ref:`extended-errors`.
+      The current extended error code, if any. See :ref:`setting-extended-resolution-errors`.
 
   .. attribute:: DNSQuestion.extendedErrorExtra
 
       .. versionadded:: 4.5.0
 
-      The current extended error extra text, as a string, if any. See :ref:`extended-errors`.
+      The current extended error extra text, as a string, if any. See :ref:`setting-extended-resolution-errors`.
 
   .. attribute:: DNSQuestion.qname
 
@@ -75,13 +81,13 @@ The DNSQuestion object contains at least the following fields:
     .. attribute:: DNSQuestion.appliedPolicy.policyName
 
       A string with the name of the policy.
-      Set by :ref:`policyName <rpz-policyName>` in the :func:`rpzFile` and :func:`rpzMaster` configuration items.
+      Set by :ref:`policyName <rpz-policyName>` in the :func:`rpzFile` and :func:`rpzPrimary` configuration items.
       It is advised to overwrite this when modifying the :attr:`DNSQuestion.appliedPolicy.policyKind`
 
     .. attribute:: DNSQuestion.appliedPolicy.policyType
 
-        The type of match for the policy.
- 
+      The type of match for the policy.
+
       -  ``pdns.policytypes.None``  the empty policy type
       -  ``pdns.policytypes.QName`` a match on qname
       -  ``pdns.policytypes.ClientIP`` a match on client IP
@@ -169,6 +175,37 @@ The DNSQuestion object contains at least the following fields:
       The result of the DNSSEC validation, accessible from the ``postresolve``, ``nxdomain`` and ``nodata`` hooks.
       Possible states are ``pdns.validationstates.Indeterminate``, ``pdns.validationstates.Bogus``, ``pdns.validationstates.Insecure`` and ``pdns.validationstates.Secure``.
       The result will always be ``pdns.validationstates.Indeterminate`` is validation is disabled or was not requested.
+
+  .. attribute:: DNSQuestion.detailedValidationState
+
+      .. versionadded:: 4.4.2
+
+      The result of the DNSSEC validation, accessible from the ``postresolve``, ``nxdomain`` and ``nodata`` hooks.
+      By contrast with :attr:`validationState <DNSQuestion.validationState>`, there are several Bogus states to be
+      able to better understand the reason for a DNSSEC validation failure.
+      Possible states are :
+      - ``pdns.validationstates.Indeterminate``
+      - ``pdns.validationstates.BogusNoValidDNSKEY``
+      - ``pdns.validationstates.BogusInvalidDenial``
+      - ``pdns.validationstates.BogusUnableToGetDSs``
+      - ``pdns.validationstates.BogusUnableToGetDNSKEYs``
+      - ``pdns.validationstates.BogusSelfSignedDS``
+      - ``pdns.validationstates.BogusNoRRSIG``
+      - ``pdns.validationstates.BogusNoValidRRSIG``
+      - ``pdns.validationstates.BogusMissingNegativeIndication``
+      - ``pdns.validationstates.BogusSignatureNotYetValid``
+      - ``pdns.validationstates.BogusSignatureExpired``
+      - ``pdns.validationstates.BogusUnsupportedDNSKEYAlgo``
+      - ``pdns.validationstates.BogusUnsupportedDSDigestType``
+      - ``pdns.validationstates.BogusNoZoneKeyBitSet``
+      - ``pdns.validationstates.BogusRevokedDNSKEY``
+      - ``pdns.validationstates.BogusInvalidDNSKEYProtocol``
+      - ``pdns.validationstates.Insecure``
+      - ``pdns.validationstates.Secure``
+
+      The result will always be ``pdns.validationstates.Indeterminate`` is validation is disabled or was not requested.
+      There is a convenience function named ``isValidationStateBogus`` that accepts such a state and return a boolean
+      indicating whether this state is a Bogus one.
 
   .. attribute:: DNSQuestion.logResponse
 

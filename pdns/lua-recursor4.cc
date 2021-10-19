@@ -158,11 +158,13 @@ void RecursorLua4::postPrepareContext()
   d_lw->registerMember<bool (DNSQuestion::*)>("isTcp", [](const DNSQuestion& dq) -> bool { return dq.isTcp; }, [](DNSQuestion& dq, bool newTcp) { (void) newTcp; });
   d_lw->registerMember<const ComboAddress (DNSQuestion::*)>("localaddr", [](const DNSQuestion& dq) -> const ComboAddress& { return dq.local; }, [](DNSQuestion& dq, const ComboAddress& newLocal) { (void) newLocal; });
   d_lw->registerMember<const ComboAddress (DNSQuestion::*)>("remoteaddr", [](const DNSQuestion& dq) -> const ComboAddress& { return dq.remote; }, [](DNSQuestion& dq, const ComboAddress& newRemote) { (void) newRemote; });
-  d_lw->registerMember<vState (DNSQuestion::*)>("validationState", [](const DNSQuestion& dq) -> vState { return dq.validationState; }, [](DNSQuestion& dq, vState newState) { (void) newState; });
+  d_lw->registerMember<uint8_t (DNSQuestion::*)>("validationState", [](const DNSQuestion& dq) -> uint8_t { return (vStateIsBogus(dq.validationState) ? /* in order not to break older scripts */ static_cast<uint8_t>(255) : static_cast<uint8_t>(dq.validationState)); }, [](DNSQuestion& dq, uint8_t newState) { (void) newState; });
+  d_lw->registerMember<vState (DNSQuestion::*)>("detailedValidationState", [](const DNSQuestion& dq) -> vState { return dq.validationState; }, [](DNSQuestion& dq, vState newState) { (void) newState; });
 
   d_lw->registerMember<bool (DNSQuestion::*)>("variable", [](const DNSQuestion& dq) -> bool { return dq.variable; }, [](DNSQuestion& dq, bool newVariable) { dq.variable = newVariable; });
   d_lw->registerMember<bool (DNSQuestion::*)>("wantsRPZ", [](const DNSQuestion& dq) -> bool { return dq.wantsRPZ; }, [](DNSQuestion& dq, bool newWantsRPZ) { dq.wantsRPZ = newWantsRPZ; });
   d_lw->registerMember<bool (DNSQuestion::*)>("logResponse", [](const DNSQuestion& dq) -> bool { return dq.logResponse; }, [](DNSQuestion& dq, bool newLogResponse) { dq.logResponse = newLogResponse; });
+  d_lw->registerMember<bool (DNSQuestion::*)>("addPaddingToResponse", [](const DNSQuestion& dq) -> bool { return dq.addPaddingToResponse; }, [](DNSQuestion& dq, bool add) { dq.addPaddingToResponse = add; });
 
   d_lw->registerMember("rcode", &DNSQuestion::rcode);
   d_lw->registerMember("tag", &DNSQuestion::tag);
@@ -388,7 +390,13 @@ void RecursorLua4::postPrepareContext()
         {"BogusInvalidDNSKEYProtocol", static_cast<unsigned int>(vState::BogusInvalidDNSKEYProtocol)},
         {"Insecure", static_cast<unsigned int>(vState::Insecure) },
         {"Secure", static_cast<unsigned int>(vState::Secure) },
+        /* in order not to break compatibility with older scripts: */
+        {"Bogus", static_cast<unsigned int>(255) },
   }});
+
+  d_lw->writeFunction("isValidationStateBogus", [](vState state) {
+    return vStateIsBogus(state);
+  });
 
   d_pd.push_back({"now", &g_now});
 
@@ -518,7 +526,8 @@ bool RecursorLua4::preoutquery(const ComboAddress& ns, const ComboAddress& reque
   bool variableAnswer = false;
   bool wantsRPZ = false;
   bool logQuery = false;
-  RecursorLua4::DNSQuestion dq(ns, requestor, query, qtype.getCode(), isTcp, variableAnswer, wantsRPZ, logQuery);
+  bool addPaddingToResponse = false;
+  RecursorLua4::DNSQuestion dq(ns, requestor, query, qtype.getCode(), isTcp, variableAnswer, wantsRPZ, logQuery, addPaddingToResponse);
   dq.currentRecords = &res;
 
   return genhook(d_preoutquery, dq, ret);
@@ -531,7 +540,7 @@ bool RecursorLua4::ipfilter(const ComboAddress& remote, const ComboAddress& loca
   return false; // don't block
 }
 
-bool RecursorLua4::policyHitEventFilter(const ComboAddress& remote, const DNSName& qname, const QType& qtype, bool tcp, DNSFilterEngine::Policy& policy, std::unordered_set<std::string>& tags, std::unordered_map<std::string, bool>& dicardedPolicies) const
+bool RecursorLua4::policyHitEventFilter(const ComboAddress& remote, const DNSName& qname, const QType& qtype, bool tcp, DNSFilterEngine::Policy& policy, std::unordered_set<std::string>& tags, std::unordered_map<std::string, bool>& discardedPolicies) const
 {
   if (!d_policyHitEventFilter) {
     return false;
@@ -540,7 +549,7 @@ bool RecursorLua4::policyHitEventFilter(const ComboAddress& remote, const DNSNam
   PolicyEvent event(remote, qname, qtype, tcp);
   event.appliedPolicy = &policy;
   event.policyTags = &tags;
-  event.discardedPolicies = &dicardedPolicies;
+  event.discardedPolicies = &discardedPolicies;
 
   if (d_policyHitEventFilter(event)) {
     return true;
@@ -657,7 +666,7 @@ loop:;
     
     if(!dq.followupFunction.empty()) {
       if(dq.followupFunction=="followCNAMERecords") {
-        ret = followCNAMERecords(dq.records, QType(dq.qtype));
+        ret = followCNAMERecords(dq.records, QType(dq.qtype), ret);
       }
       else if(dq.followupFunction=="getFakeAAAARecords") {
         ret=getFakeAAAARecords(dq.followupName, ComboAddress(dq.followupPrefix), dq.records);
@@ -666,7 +675,8 @@ loop:;
         ret=getFakePTRRecords(dq.followupName, dq.records);
       }
       else if(dq.followupFunction=="udpQueryResponse") {
-        dq.udpAnswer = GenUDPQueryResponse(dq.udpQueryDest, dq.udpQuery);
+        PacketBuffer p = GenUDPQueryResponse(dq.udpQueryDest, dq.udpQuery);
+        dq.udpAnswer = std::string(reinterpret_cast<const char*>(p.data()), p.size());
         auto cbFunc = d_lw->readVariable<boost::optional<luacall_t>>(dq.udpCallback).get_value_or(0);
         if(!cbFunc) {
           g_log<<Logger::Error<<"Attempted callback for Lua UDP Query/Response which could not be found"<<endl;
@@ -960,4 +970,9 @@ bool pdns_ffi_param_add_record(pdns_ffi_param_t *ref, const char* name, uint16_t
     g_log<<Logger::Error<<"Error attempting to add a record from Lua via pdns_ffi_param_add_record(): "<<e.what()<<endl;
     return false;
   }
+}
+
+void pdns_ffi_param_set_padding_disabled(pdns_ffi_param_t* ref, bool disabled)
+{
+  ref->params.disablePadding = disabled;
 }

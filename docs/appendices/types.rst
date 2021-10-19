@@ -48,8 +48,6 @@ A specialised record type for the 'Andrew Filesystem'. Stored as:
 ALIAS
 -----
 
-.. versionadded:: 4.0.0
-
 The ALIAS pseudo-record type is supported to provide
 CNAME-like mechanisms on a zone's apex. See the :doc:`howto <../guides/alias>` for information
 on how to configure PowerDNS to serve records synthesized from ALIAS
@@ -60,16 +58,12 @@ records.
 APL
 -----
 
-.. versionadded:: 4.4.0
-
 The APL record, specified in :rfc:`3123`, is used to specify a DNS RR type "APL" for address prefix lists.
 
 .. _types-caa:
 
 CAA
 ---
-
-.. versionadded:: 4.0.0
 
 The "Certification Authority Authorization" record,
 specified in :rfc:`6844`, is used
@@ -88,16 +82,12 @@ Specialised record type for storing certificates, defined in :rfc:`2538`.
 CDNSKEY
 -------
 
-.. versionadded:: 4.0.0
-
 The CDNSKEY (:rfc:`Child DNSKEY <7344#section-3.2>`) type is supported.
 
 .. _types-cds:
 
 CDS
 ---
-
-.. versionadded:: 4.0.0
 
 The CDS (:rfc:`Child DS <7344#section-3.1>`) type is supported.
 
@@ -109,6 +99,15 @@ CNAME
 The CNAME record specifies the canonical name of a record. It is stored
 plainly. Like all other records, it is not terminated by a dot. A sample
 might be 'webserver-01.yourcompany.com'.
+
+.. _types-csync:
+
+CSYNC
+-----
+
+The CSYNC record is used for 'Child-to-Parent Synchronization in DNS', as described in :rfc:`7477`.
+Right now it is only supported as zone content; no special processing is implemented.
+Note that SOA-EDIT is not applied to serial numbers in CSYNC content.
 
 .. _types-dnskey:
 
@@ -379,3 +378,17 @@ The following, rarely used or obsolete record types, are also supported:
 -  RKEY (`draft-reid-dnsext-rkey-00.txt <https://tools.ietf.org/html/draft-reid-dnsext-rkey-00>`__)
 -  SIG (:rfc:`2535`, obsolete)
 -  WKS (:rfc:`1035`)
+
+.. _types-unknown:
+
+Unknown DNS Resource Record (RR) Types
+--------------------------------------
+
+PowerDNS supports (:rfc:`3597`) syntax for serving unknown record types. For example
+
+::
+
+   e.example.   IN          TYPE1               \# 4 0A000001
+
+Beware that PowerDNS will attempt to parse known record types even if written in this syntax.
+This bug will be fixed in future release.

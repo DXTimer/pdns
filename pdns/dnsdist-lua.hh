@@ -55,7 +55,7 @@ public:
   {
   }
 
-  SpoofAction(const std::string& raw): d_rawResponse(raw)
+  SpoofAction(const vector<std::string>& raws): d_rawResponses(raws)
   {
   }
 
@@ -67,7 +67,7 @@ public:
     if (!d_cname.empty()) {
       ret += d_cname.toString() + " ";
     }
-    else if (!d_rawResponse.empty()) {
+    if (d_rawResponses.size() > 0) {
       ret += "raw bytes ";
     }
     else {
@@ -83,14 +83,14 @@ private:
   static thread_local std::default_random_engine t_randomEngine;
   std::vector<ComboAddress> d_addrs;
   std::set<uint16_t> d_types;
-  std::string d_rawResponse;
+  std::vector<std::string> d_rawResponses;
   DNSName d_cname;
 };
 
 typedef boost::variant<string, vector<pair<int, string>>, std::shared_ptr<DNSRule>, DNSName, vector<pair<int, DNSName> > > luadnsrule_t;
 std::shared_ptr<DNSRule> makeRule(const luadnsrule_t& var);
 typedef std::unordered_map<std::string, boost::variant<std::string> > luaruleparams_t;
-void parseRuleParams(boost::optional<luaruleparams_t> params, boost::uuids::uuid& uuid, uint64_t& creationOrder);
+void parseRuleParams(boost::optional<luaruleparams_t> params, boost::uuids::uuid& uuid, std::string& name, uint64_t& creationOrder);
 
 typedef NetmaskTree<DynBlock> nmts_t;
 

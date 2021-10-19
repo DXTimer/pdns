@@ -27,8 +27,6 @@
 #include "bpf-filter.hh"
 #include "iputils.hh"
 
-#ifdef HAVE_EBPF
-
 #include <boost/multi_index_container.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 
@@ -43,10 +41,12 @@ public:
   }
   void excludeRange(const Netmask& range)
   {
+    std::unique_lock<std::mutex> lock(d_mutex);
     d_excludedSubnets.addMask(range);
   }
   void includeRange(const Netmask& range)
   {
+    std::unique_lock<std::mutex> lock(d_mutex);
     d_excludedSubnets.addMask(range, false);
   }
   /* returns true if the addr wasn't already blocked, false otherwise */
@@ -74,4 +74,3 @@ private:
   NetmaskGroup d_excludedSubnets;
 };
 
-#endif /* HAVE_EBPF */

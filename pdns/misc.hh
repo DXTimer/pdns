@@ -80,7 +80,7 @@ struct ServiceTuple
 };
 void parseService(const string &descr, ServiceTuple &st);
 
-template <typename Container>
+template<typename Container>
 void
 stringtok (Container &container, string const &in,
            const char * const delimiters = " \t\n")
@@ -312,6 +312,10 @@ inline float makeFloat(const struct timeval& tv)
 {
   return tv.tv_sec + tv.tv_usec/1000000.0f;
 }
+inline uint64_t uSec(const struct timeval& tv)
+{
+  return tv.tv_sec * 1000000 + tv.tv_usec;
+}
 
 inline bool operator<(const struct timeval& lhs, const struct timeval& rhs)
 {
@@ -370,7 +374,7 @@ inline bool pdns_iequals_ch(const char a, const char b)
 typedef unsigned long AtomicCounterInner;
 typedef std::atomic<AtomicCounterInner> AtomicCounter ;
 
-// FIXME400 this should probably go? 
+// FIXME400 this should probably go?
 struct CIStringCompare: public std::binary_function<string, string, bool>
 {
   bool operator()(const string& a, const string& b) const
@@ -484,8 +488,8 @@ public:
   SimpleMatch(const string &mask, bool caseFold = false): d_mask(mask), d_fold(caseFold)
   {
   }
- 
-  bool match(string::const_iterator mi, string::const_iterator mend, string::const_iterator vi, string::const_iterator vend)
+
+  bool match(string::const_iterator mi, string::const_iterator mend, string::const_iterator vi, string::const_iterator vend) const
   {
     for(;;++mi) {
       if (mi == mend) {
@@ -494,8 +498,8 @@ public:
         if (vi == vend) return false;
         ++vi;
       } else if (*mi == '*') {
-        while(*mi == '*') ++mi;
-        if (mi == d_mask.end()) return true;
+        while(mi != mend && *mi == '*') ++mi;
+        if (mi == mend) return true;
         while(vi != vend) {
           if (match(mi,mend,vi,vend)) return true;
           ++vi;
@@ -514,17 +518,17 @@ public:
     }
   }
 
-  bool match(const string& value) {
+  bool match(const string& value) const {
     return match(d_mask.begin(), d_mask.end(), value.begin(), value.end());
   }
 
-  bool match(const DNSName& name) {
+  bool match(const DNSName& name) const {
     return match(name.toStringNoDot());
   }
 
 private:
-  string d_mask;
-  bool d_fold;
+  const string d_mask;
+  const bool d_fold;
 };
 
 union ComboAddress;
@@ -557,6 +561,7 @@ size_t getPipeBufferSize(int fd);
 bool setPipeBufferSize(int fd, size_t size);
 
 uint64_t udpErrorStats(const std::string& str);
+uint64_t tcpErrorStats(const std::string& str);
 uint64_t getRealMemoryUsage(const std::string&);
 uint64_t getSpecialMemoryUsage(const std::string&);
 uint64_t getOpenFileDescriptors(const std::string&);
@@ -565,12 +570,6 @@ uint64_t getCPUTimeSystem(const std::string&);
 uint64_t getCPUIOWait(const std::string&);
 uint64_t getCPUSteal(const std::string&);
 std::string getMACAddress(const ComboAddress& ca);
-template<typename T, typename... Args>
-std::unique_ptr<T> make_unique(Args&&... args)
-{
-    return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-}
-
 
 template<typename T>
 const T& defTer(const T& a, const T& b)
@@ -625,3 +624,10 @@ DNSName reverseNameFromIP(const ComboAddress& ip);
 
 std::string getCarbonHostName();
 size_t parseRFC1035CharString(const std::string &in, std::string &val); // from ragel
+size_t parseSVCBValueListFromParsedRFC1035CharString(const std::string &in, vector<std::string> &val); // from ragel
+size_t parseSVCBValueList(const std::string &in, vector<std::string> &val);
+
+std::string makeLuaString(const std::string& in);
+
+// Used in NID and L64 records
+struct NodeOrLocatorID { uint8_t content[8]; };

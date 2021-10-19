@@ -63,6 +63,7 @@ private:
     std::map<uint8_t, uint64_t> d_rcodeCounts;
     std::map<uint16_t, uint64_t> d_qtypeCounts;
     uint64_t queries{0};
+    uint64_t responses{0};
     uint64_t respBytes{0};
   };
 
@@ -275,9 +276,19 @@ public:
     d_excludedSubnets.addMask(range);
   }
 
+  void excludeRange(const NetmaskGroup& group)
+  {
+    d_excludedSubnets.addMasks(group, true);
+  }
+
   void includeRange(const Netmask& range)
   {
     d_excludedSubnets.addMask(range, false);
+  }
+
+  void includeRange(const NetmaskGroup& group)
+  {
+    d_excludedSubnets.addMasks(group, false);
   }
 
   void excludeDomain(const DNSName& domain)
@@ -301,7 +312,7 @@ public:
     }
     result << "QType rules: " << std::endl;
     for (const auto& rule : d_qtypeRules) {
-      result << "- " << QType(rule.first).getName() << ": " << rule.second.toString() << std::endl;
+      result << "- " << QType(rule.first).toString() << ": " << rule.second.toString() << std::endl;
     }
     result << "Excluded Subnets: " << d_excludedSubnets.toString() << std::endl;
     result << "Excluded Domains: " << d_excludedDomains.toString() << std::endl;
@@ -365,4 +376,40 @@ private:
   smtVisitor_t d_smtVisitor;
   dnsdist_ffi_stat_node_visitor_t d_smtVisitorFFI;
   bool d_beQuiet{false};
+};
+
+class DynBlockMaintenance
+{
+public:
+  static void run();
+
+  /* return the (cached) number of hits per second for the top offenders, averaged over 60s */
+  static std::map<std::string, std::list<std::pair<Netmask, unsigned int>>> getHitsForTopNetmasks();
+  static std::map<std::string, std::list<std::pair<DNSName, unsigned int>>> getHitsForTopSuffixes();
+
+  /* get the the top offenders based on the current value of the counters */
+  static std::map<std::string, std::list<std::pair<Netmask, unsigned int>>> getTopNetmasks(size_t topN);
+  static std::map<std::string, std::list<std::pair<DNSName, unsigned int>>> getTopSuffixes(size_t topN);
+  static void purgeExpired(const struct timespec& now);
+
+  static time_t s_expiredDynBlocksPurgeInterval;
+
+private:
+  static void collectMetrics();
+  static void generateMetrics();
+
+  struct MetricsSnapshot
+  {
+    std::map<std::string, std::list<std::pair<Netmask, unsigned int>>> nmgData;
+    std::map<std::string, std::list<std::pair<DNSName, unsigned int>>> smtData;
+  };
+
+  /* Protects s_topNMGsByReason and s_topSMTsByReason. s_metricsData should only be accessed
+     by the dynamic blocks maintenance thread so it does not need a lock. */
+  static std::mutex s_topsMutex;
+  // need N+1 datapoints to be able to do the diff after a collection point has been reached
+  static std::list<MetricsSnapshot> s_metricsData;
+  static std::map<std::string, std::list<std::pair<Netmask, unsigned int>>> s_topNMGsByReason;
+  static std::map<std::string, std::list<std::pair<DNSName, unsigned int>>> s_topSMTsByReason;
+  static size_t s_topN;
 };

@@ -1,4 +1,14 @@
-AM_CPPFLAGS += $(SYSTEMD_CFLAGS) $(LUA_CFLAGS) $(LIBEDIT_CFLAGS) $(LIBSODIUM_CFLAGS) $(FSTRM_CFLAGS) $(YAHTTP_CFLAGS) $(SANITIZER_FLAGS) $(NET_SNMP_CFLAGS) $(LIBCAP_CFLAGS) -DSYSCONFDIR=\"${sysconfdir}\"
+AM_CPPFLAGS += $(SYSTEMD_CFLAGS) \
+	$(LUA_CFLAGS) \
+	$(LIBEDIT_CFLAGS) \
+	$(LIBSODIUM_CFLAGS) \
+	$(FSTRM_CFLAGS) \
+	$(YAHTTP_CFLAGS) \
+	$(NET_SNMP_CFLAGS) \
+	$(LIBCAP_CFLAGS) \
+	-I$(top_srcdir)/ext/protozero/include \
+	-DSYSCONFDIR=\"${sysconfdir}\" \
+	-DBOOST_CONTAINER_USE_STD_EXCEPTIONS
 
 ACLOCAL_AMFLAGS = -I m4
 
@@ -6,13 +16,9 @@ SUBDIRS=ext/ipcrypt \
 	ext/yahttp
 
 CLEANFILES = \
-	dnsmessage.pb.cc \
-	dnsmessage.pb.h \
 	htmlfiles.h.tmp \
 	htmlfiles.h \
-	dnsdist-lua-ffi-interface.inc \
-	dnstap.pb.cc \
-	dnstap.pb.h
+	dnsdist-lua-ffi-interface.inc
 
 dnslabeltext.cc: dnslabeltext.rl
 	$(AM_V_GEN)$(RAGEL) $< -o dnslabeltext.cc
@@ -38,7 +44,9 @@ html/js/%.min.js: src_js/%.js
 min_js: $(MIN_JS_FILES)
 
 if HAVE_RE2
+# Some versions of pkg_config add -std=c11++, override that
 AM_CPPFLAGS += $(RE2_CFLAGS)
+AM_CPPFLAGS += -std=c++17
 endif
 
 if HAVE_DNS_OVER_TLS
@@ -81,8 +89,6 @@ EXTRA_DIST=COPYING \
 	   README.md \
 	   delaypipe.cc delaypipe.hh \
 	   html \
-	   contrib \
-	   ext/incbin/UNLICENSE \
 	   incfiles \
 	   src_js \
 	   dnsdist.service.in \
@@ -97,6 +103,7 @@ EXTRA_DIST=COPYING \
 	   portsmplexer.cc \
 	   cdb.cc cdb.hh \
 	   ext/lmdb-safe/lmdb-safe.cc ext/lmdb-safe/lmdb-safe.hh \
+	   ext/protozero/include/* \
 	   builder-support/gen-version
 
 bin_PROGRAMS = dnsdist
@@ -121,6 +128,7 @@ dnsdist_SOURCES = \
 	cachecleaner.hh \
 	capabilities.cc capabilities.hh \
 	circular_buffer.hh \
+	connection-management.hh \
 	dns.cc dns.hh \
 	dnscrypt.cc dnscrypt.hh \
 	dnsdist-backend.cc \
@@ -149,7 +157,7 @@ dnsdist_SOURCES = \
 	dnsdist-lua-rules.cc \
 	dnsdist-lua-vars.cc \
 	dnsdist-lua-web.cc \
-	dnsdist-lua.hh dnsdist-lua.cc \
+	dnsdist-lua.cc dnsdist-lua.hh \
 	dnsdist-prometheus.hh \
 	dnsdist-protobuf.cc dnsdist-protobuf.hh \
 	dnsdist-proxy-protocol.cc dnsdist-proxy-protocol.hh \
@@ -158,6 +166,8 @@ dnsdist_SOURCES = \
 	dnsdist-secpoll.cc dnsdist-secpoll.hh \
 	dnsdist-snmp.cc dnsdist-snmp.hh \
 	dnsdist-systemd.cc dnsdist-systemd.hh \
+	dnsdist-tcp-downstream.cc dnsdist-tcp-downstream.hh \
+	dnsdist-tcp-upstream.hh \
 	dnsdist-tcp.cc \
 	dnsdist-web.cc dnsdist-web.hh \
 	dnsdist-xpf.cc dnsdist-xpf.hh \
@@ -172,7 +182,6 @@ dnsdist_SOURCES = \
 	ednscookies.cc ednscookies.hh \
 	ednsoptions.cc ednsoptions.hh \
 	ednssubnet.cc ednssubnet.hh \
-	ext/incbin/incbin.h \
 	ext/json11/json11.cpp \
 	ext/json11/json11.hpp \
 	ext/libbpf/libbpf.h \
@@ -186,10 +195,11 @@ dnsdist_SOURCES = \
 	misc.cc misc.hh \
 	mplexer.hh \
 	namespaces.hh \
+	noinitvector.hh \
 	packetcache.hh \
 	pdnsexception.hh \
 	pollmplexer.cc \
-	protobuf.cc protobuf.hh \
+	protozero.cc protozero.hh \
 	proxy-protocol.cc proxy-protocol.hh \
 	qtype.cc qtype.hh \
 	remote_logger.cc remote_logger.hh \
@@ -197,12 +207,13 @@ dnsdist_SOURCES = \
 	snmp-agent.cc snmp-agent.hh \
 	sodcrypto.cc sodcrypto.hh \
 	sstuff.hh \
+	stat_t.hh \
 	statnode.cc statnode.hh \
 	svc-records.cc svc-records.hh \
+	tcpiohandler-mplexer.hh \
 	tcpiohandler.cc tcpiohandler.hh \
 	threadname.hh threadname.cc \
 	uuid-utils.hh uuid-utils.cc \
-	views.hh \
 	xpf.cc xpf.hh
 
 testrunner_SOURCES = \
@@ -210,6 +221,7 @@ testrunner_SOURCES = \
 	bpf-filter.cc bpf-filter.hh \
 	cachecleaner.hh \
 	circular_buffer.hh \
+	connection-management.hh \
 	dns.cc dns.hh \
 	dnscrypt.cc dnscrypt.hh \
 	dnsdist-backend.cc \
@@ -217,6 +229,7 @@ testrunner_SOURCES = \
 	dnsdist-dynblocks.cc dnsdist-dynblocks.hh \
 	dnsdist-dynbpf.cc dnsdist-dynbpf.hh \
 	dnsdist-ecs.cc dnsdist-ecs.hh \
+	dnsdist-idstate.cc \
 	dnsdist-kvs.cc dnsdist-kvs.hh \
 	dnsdist-lbpolicies.cc dnsdist-lbpolicies.hh \
 	dnsdist-lua-bindings-dnsquestion.cc \
@@ -225,7 +238,10 @@ testrunner_SOURCES = \
 	dnsdist-lua-ffi-interface.h dnsdist-lua-ffi-interface.inc \
 	dnsdist-lua-ffi.cc dnsdist-lua-ffi.hh \
 	dnsdist-lua-vars.cc \
-	dnsdist-rings.hh \
+	dnsdist-proxy-protocol.cc dnsdist-proxy-protocol.hh \
+	dnsdist-rings.cc dnsdist-rings.hh \
+	dnsdist-tcp-downstream.cc \
+	dnsdist-tcp.cc \
 	dnsdist-xpf.cc dnsdist-xpf.hh \
 	dnsdist.hh \
 	dnslabeltext.cc \
@@ -241,6 +257,7 @@ testrunner_SOURCES = \
 	iputils.cc iputils.hh \
 	misc.cc misc.hh \
 	namespaces.hh \
+	noinitvector.hh \
 	pdnsexception.hh \
 	pollmplexer.cc \
 	proxy-protocol.cc proxy-protocol.hh \
@@ -248,9 +265,11 @@ testrunner_SOURCES = \
 	sholder.hh \
 	sodcrypto.cc \
 	sstuff.hh \
+	stat_t.hh \
 	statnode.cc statnode.hh \
 	svc-records.cc svc-records.hh \
 	test-base64_cc.cc \
+	test-connectionmanagement_hh.cc \
 	test-delaypipe_hh.cc \
 	test-dnscrypt_cc.cc \
 	test-dnsdist_cc.cc \
@@ -260,8 +279,10 @@ testrunner_SOURCES = \
 	test-dnsdistpacketcache_cc.cc \
 	test-dnsdistrings_cc.cc \
 	test-dnsdistrules_cc.cc \
+	test-dnsdisttcp_cc.cc \
 	test-dnsparser_cc.cc \
 	test-iputils_hh.cc \
+	test-luawrapper.cc \
 	test-mplexer.cc \
 	test-proxy_protocol_cc.cc \
 	testrunner.cc \
@@ -281,7 +302,6 @@ dnsdist_LDADD = \
 	$(YAHTTP_LIBS) \
 	$(LIBSODIUM_LIBS) \
 	$(FSTRM_LIBS) \
-	$(SANITIZER_FLAGS) \
 	$(SYSTEMD_LIBS) \
 	$(NET_SNMP_LIBS) \
 	$(LIBCAP_LIBS) \
@@ -299,7 +319,6 @@ testrunner_LDADD = \
 	$(LIBSODIUM_LIBS) \
 	$(LUA_LIBS) \
 	$(RT_LIBS) \
-	$(SANITIZER_FLAGS) \
 	$(LIBCAP_LIBS)
 
 if HAVE_CDB
@@ -349,23 +368,6 @@ nodist_dnsdist_SOURCES = lua.hpp
 endif
 
 CLEANFILES += lua.hpp
-
-if HAVE_PROTOBUF
-if HAVE_PROTOC
-dnsmessage.pb.cc: dnsmessage.proto
-	$(AM_V_GEN)$(PROTOC) -I$(srcdir) --cpp_out=./ $<
-
-dnstap.pb.cc: dnstap.proto
-	$(AM_V_GEN)$(PROTOC) -I$(srcdir) --cpp_out=./ $<
-
-BUILT_SOURCES += dnsmessage.pb.cc dnstap.pb.cc
-
-nodist_dnsdist_SOURCES = dnsmessage.pb.cc dnsmessage.pb.h dnstap.pb.cc dnstap.pb.h
-dnsdist_LDADD += $(PROTOBUF_LIBS)
-
-dnsdist.$(OBJEXT): dnsmessage.pb.cc dnstap.pb.cc
-endif
-endif
 
 if HAVE_FREEBSD
 dnsdist_SOURCES += kqueuemplexer.cc

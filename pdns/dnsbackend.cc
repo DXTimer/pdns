@@ -29,7 +29,8 @@
 #include "logger.hh"
 
 #include <sys/types.h>
-#include "pdns/packetcache.hh"
+#include "packetcache.hh"
+#include "auth-zonecache.hh"
 #include "dnspacket.hh"
 #include "dns.hh"
 #include "statbag.hh"
@@ -130,7 +131,7 @@ void BackendMakerClass::load(const string &module)
 {
   bool res;
 
-  if(module.find(".")==string::npos)
+  if(module.find('.')==string::npos)
     res=UeberBackend::loadmodule(arg()["module-dir"]+"/lib"+module+"backend.so");
   else if(module[0]=='/' || (module[0]=='.' && module[1]=='/') || (module[0]=='.' && module[1]=='.'))    // absolute or current path
     res=UeberBackend::loadmodule(module);
@@ -155,9 +156,7 @@ void BackendMakerClass::launch(const string &instr)
     if (count(parts.begin(), parts.end(), part) > 1)
       throw ArgException("Refusing to launch multiple backends with the same name '" + part + "', verify all 'launch' statements in your configuration");
 
-  for(vector<string>::const_iterator i=parts.begin();i!=parts.end();++i) {
-    const string &part=*i;
-
+  for(const auto & part : parts) {
     string module, name;
     vector<string>pparts;
     stringtok(pparts,part,": ");
@@ -247,25 +246,31 @@ bool DNSBackend::getSOA(const DNSName &domain, SOAData &sd)
   S.inc("backend-queries");
 
   DNSResourceRecord rr;
-  rr.auth = true;
-
   int hits=0;
 
-  while(this->get(rr)) {
-    if (rr.qtype != QType::SOA) throw PDNSException("Got non-SOA record when asking for SOA");
-    hits++;
-    fillSOAData(rr.content, sd);
-    sd.domain_id=rr.domain_id;
-    sd.ttl=rr.ttl;
+  sd.db = nullptr;
+
+  try {
+    while (this->get(rr)) {
+      if (rr.qtype != QType::SOA) {
+        throw PDNSException("Got non-SOA record when asking for SOA, zone: '" + domain.toLogString() + "'");
+      }
+      hits++;
+      sd.qname = domain;
+      sd.ttl = rr.ttl;
+      sd.db = this;
+      sd.domain_id = rr.domain_id;
+      fillSOAData(rr.content, sd);
+    }
+  }
+  catch (const PDNSException& e) {
+    while (this->get(rr)) {
+      ;
+    }
+    throw;
   }
 
-  if(!hits)
-    return false;
-
-  sd.qname = domain;
-  sd.db=this;
-
-  return true;
+  return hits;
 }
 
 bool DNSBackend::get(DNSZoneRecord& dzr)
@@ -297,6 +302,14 @@ bool DNSBackend::getBeforeAndAfterNames(uint32_t id, const DNSName& zonename, co
   before += lczonename;
   after += lczonename;
   return ret;
+}
+
+void DNSBackend::getAllDomains(vector<DomainInfo>* domains, bool include_disabled)
+{
+  if (g_zoneCache.isEnabled()) {
+    g_log << Logger::Error << "One of the backends does not support zone caching. Put zone-cache-refresh-interval=0 in the config file to disable this cache." << endl;
+    exit(1);
+  }
 }
 
 void fillSOAData(const DNSZoneRecord& in, SOAData& sd)
@@ -341,6 +354,6 @@ void fillSOAData(const string &content, SOAData &data)
     data.minimum = pdns_stou(parts.at(6).c_str());
   }
   catch(const std::out_of_range& oor) {
-    throw PDNSException("Out of range exception parsing "+content);
+    throw PDNSException("Out of range exception parsing '" + content + "'");
   }
 }

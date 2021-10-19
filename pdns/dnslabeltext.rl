@@ -22,7 +22,7 @@ void appendSplit(vector<string>& ret, string& segment, char c)
 
 vector<string> segmentDNSText(const string& input )
 {
-  // cerr<<"segmentDNSText("<<input<<")"<<endl; 
+  // cerr<<"segmentDNSText("<<input<<")"<<endl;
 %%{
         machine dnstext;
         write data;
@@ -39,11 +39,11 @@ vector<string> segmentDNSText(const string& input )
         vector<string> ret;
 
         %%{
-                action segmentEnd { 
+                action segmentEnd {
                         ret.push_back(segment);
                         segment.clear();
                 }
-                action segmentBegin { 
+                action segmentBegin {
                         segment.clear();
                 }
 
@@ -55,13 +55,13 @@ vector<string> segmentDNSText(const string& input )
                   char c = *fpc;
                   val *= 10;
                   val += c-'0';
-                  
+
                 }
                 action doneEscapedNumber {
                   appendSplit(ret, segment, val);
                   val=0;
                 }
-                
+
                 action reportPlain {
                   appendSplit(ret, segment, *(fpc));
                 }
@@ -69,7 +69,7 @@ vector<string> segmentDNSText(const string& input )
                 escaped = '\\' (([^0-9]@reportEscaped) | ([0-9]{3}$reportEscapedNumber%doneEscapedNumber));
                 plain = ((extend-'\\'-'"')|'\n'|'\t') $ reportPlain;
                 txtElement = escaped | plain;
-            
+
                 main := (('"' txtElement* '"' space?) >segmentBegin %segmentEnd)+;
 
                 # Initialize and execute.
@@ -111,14 +111,14 @@ DNSName::string_t segmentDNSNameRaw(const char* realinput, size_t inputlen)
         char labellen=0;
         unsigned int lenpos=0;
         %%{
-                action labelEnd { 
+                action labelEnd {
                         if (labellen < 0 || labellen > 63) {
                           throw runtime_error("Unable to parse DNS name '"+string(realinput)+"': invalid label length "+std::to_string(labellen));
                         }
                         ret[lenpos]=labellen;
                         labellen=0;
                 }
-                action labelBegin { 
+                action labelBegin {
                         lenpos=ret.size();
                         ret.append(1, (char)0);
                         labellen=0;
@@ -139,7 +139,7 @@ DNSName::string_t segmentDNSNameRaw(const char* realinput, size_t inputlen)
                   labellen++;
                   val=0;
                 }
-                
+
                 action reportPlain {
                   ret.append(1, *(fpc));
                   labellen++;
@@ -147,7 +147,7 @@ DNSName::string_t segmentDNSNameRaw(const char* realinput, size_t inputlen)
 
                 escaped = '\\' (([^0-9]@reportEscaped) | ([0-9]{3}$reportEscapedNumber%doneEscapedNumber));
                 plain = (extend-'\\'-'.') $ reportPlain;
-                labelElement = escaped | plain;            
+                labelElement = escaped | plain;
 
                 label = labelElement+ >labelBegin %labelEnd;
 
@@ -240,6 +240,65 @@ size_t parseRFC1035CharString(const std::string &in, std::string &val) {
   return counter;
 }
 
+size_t parseSVCBValueListFromParsedRFC1035CharString(const std::string &in, std::vector<std::string> &val) {
+  val.clear();
+  const char *p = in.c_str();
+  const char *pe = p + in.size();
+  int cs = 0;
+  const char* eof = pe;
+  // Keeps track of how many chars we read from the source string
+  size_t counter=0;
+
+  // Here we store the parsed value until we hit a comma or are done
+  std::string tmp;
+
+%%{
+  machine dns_text_to_value_list;
+  alphtype unsigned char;
+
+  action addToVal {
+    tmp += fc;
+    counter++;
+  }
+
+  action addToValNoIncrement {
+    tmp += fc;
+  }
+
+  action addToVector {
+    val.push_back(tmp);
+    tmp.clear();
+    counter++;
+  }
+
+  action incrementCounter {
+    counter++;
+  }
+
+  # generated rules, define required actions
+  OCTET = 0x00..0xff;
+  item_allowed = 0x00..0x2b | 0x2d..0x5b | 0x5d..0xff;
+  escaped_item = ( item_allowed$addToVal | '\\,'$incrementCounter@addToValNoIncrement | '\\\\'$incrementCounter@addToValNoIncrement )+;
+  comma_separated = ( escaped_item%addToVector ( ","@incrementCounter escaped_item%addToVector )* )?;
+
+  # instantiate machine rules
+  main := comma_separated;
+  write data;
+  write init;
+}%%
+
+  // silence warnings
+  (void) dns_text_to_value_list_first_final;
+  (void) dns_text_to_value_list_error;
+  (void) dns_text_to_value_list_en_main;
+  %% write exec;
+
+  if ( cs < dns_text_to_value_list_first_final ) {
+          throw runtime_error("Unable to parse DNS SVCB value list '"+in+"'");
+  }
+
+  return counter;
+}
 
 
 #if 0

@@ -1,9 +1,12 @@
 
 #pragma once
 #include <memory>
+/* needed for proper TCP_FASTOPEN_CONNECT detection */
+#include <netinet/tcp.h>
 
 #include "libssl.hh"
 #include "misc.hh"
+#include "noinitvector.hh"
 
 enum class IOState { Done, NeedRead, NeedWrite };
 
@@ -12,11 +15,14 @@ class TLSConnection
 public:
   virtual ~TLSConnection() { }
   virtual void doHandshake() = 0;
+  virtual IOState tryConnect(bool fastOpen, const ComboAddress& remote) = 0;
+  virtual void connect(bool fastOpen, const ComboAddress& remote, unsigned int timeout) = 0;
   virtual IOState tryHandshake() = 0;
   virtual size_t read(void* buffer, size_t bufferSize, unsigned int readTimeout, unsigned int totalTimeout=0) = 0;
   virtual size_t write(const void* buffer, size_t bufferSize, unsigned int writeTimeout) = 0;
-  virtual IOState tryWrite(std::vector<uint8_t>& buffer, size_t& pos, size_t toWrite) = 0;
-  virtual IOState tryRead(std::vector<uint8_t>& buffer, size_t& pos, size_t toRead) = 0;
+  virtual IOState tryWrite(const PacketBuffer& buffer, size_t& pos, size_t toWrite) = 0;
+  virtual IOState tryRead(PacketBuffer& buffer, size_t& pos, size_t toRead) = 0;
+  virtual bool hasBufferedData() const = 0;
   virtual std::string getServerNameIndication() const = 0;
   virtual LibsslTLSVersion getTLSVersion() const = 0;
   virtual bool hasSessionBeenResumed() const = 0;
@@ -57,6 +63,7 @@ public:
   }
   virtual ~TLSCtx() {}
   virtual std::unique_ptr<TLSConnection> getConnection(int socket, unsigned int timeout, time_t now) = 0;
+  virtual std::unique_ptr<TLSConnection> getClientConnection(const std::string& host, int socket, unsigned int timeout) = 0;
   virtual void rotateTicketsKey(time_t now) = 0;
   virtual void loadTicketsKeys(const std::string& file)
   {
@@ -94,13 +101,21 @@ public:
 
 protected:
   std::atomic_flag d_rotatingTicketsKey;
+  std::atomic<time_t> d_ticketsKeyNextRotation{0};
   time_t d_ticketsKeyRotationDelay{0};
-  time_t d_ticketsKeyNextRotation{0};
 };
 
 class TLSFrontend
 {
 public:
+  TLSFrontend()
+  {
+  }
+
+  TLSFrontend(std::shared_ptr<TLSCtx> ctx): d_ctx(std::move(ctx))
+  {
+  }
+
   bool setupTLS();
 
   void rotateTicketsKey(time_t now)
@@ -119,7 +134,7 @@ public:
 
   std::shared_ptr<TLSCtx> getContext()
   {
-    return d_ctx;
+    return std::atomic_load_explicit(&d_ctx, std::memory_order_acquire);
   }
 
   void cleanup()
@@ -168,13 +183,21 @@ public:
   ComboAddress d_addr;
   std::string d_provider;
 
-private:
+protected:
   std::shared_ptr<TLSCtx> d_ctx{nullptr};
 };
 
 class TCPIOHandler
 {
 public:
+  enum class Type { Client, Server };
+
+  TCPIOHandler(const std::string& host, int socket, unsigned int timeout, std::shared_ptr<TLSCtx> ctx, time_t now): d_socket(socket)
+  {
+    if (ctx) {
+      d_conn = ctx->getClientConnection(host, d_socket, timeout);
+    }
+  }
 
   TCPIOHandler(int socket, unsigned int timeout, std::shared_ptr<TLSCtx> ctx, time_t now): d_socket(socket)
   {
@@ -185,11 +208,87 @@ public:
 
   ~TCPIOHandler()
   {
+    close();
+  }
+
+  void close()
+  {
     if (d_conn) {
       d_conn->close();
+      d_conn.reset();
     }
-    else if (d_socket != -1) {
+
+    if (d_socket != -1) {
       shutdown(d_socket, SHUT_RDWR);
+      ::close(d_socket);
+      d_socket = -1;
+    }
+  }
+
+  int getDescriptor() const
+  {
+    return d_socket;
+  }
+
+  IOState tryConnect(bool fastOpen, const ComboAddress& remote)
+  {
+    d_remote = remote;
+
+#ifdef TCP_FASTOPEN_CONNECT /* Linux >= 4.11 */
+    if (fastOpen) {
+      int value = 1;
+      int res = setsockopt(d_socket, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &value, sizeof(value));
+      if (res == 0) {
+        fastOpen = false;
+      }
+    }
+#endif /* TCP_FASTOPEN_CONNECT */
+
+#ifdef MSG_FASTOPEN
+    if (!d_conn && fastOpen) {
+      d_fastOpen = true;
+    }
+    else {
+      SConnectWithTimeout(d_socket, remote, /* no timeout, we will handle it ourselves */ 0);
+    }
+#else
+    SConnectWithTimeout(d_socket, remote, /* no timeout, we will handle it ourselves */ 0);
+#endif /* MSG_FASTOPEN */
+
+    if (d_conn) {
+      return d_conn->tryConnect(fastOpen, remote);
+    }
+
+    return IOState::Done;
+  }
+
+  void connect(bool fastOpen, const ComboAddress& remote, unsigned int timeout)
+  {
+    d_remote = remote;
+
+#ifdef TCP_FASTOPEN_CONNECT /* Linux >= 4.11 */
+    if (fastOpen) {
+      int value = 1;
+      int res = setsockopt(d_socket, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &value, sizeof(value));
+      if (res == 0) {
+        fastOpen = false;
+      }
+    }
+#endif /* TCP_FASTOPEN_CONNECT */
+
+#ifdef MSG_FASTOPEN
+    if (!d_conn && fastOpen) {
+      d_fastOpen = true;
+    }
+    else {
+      SConnectWithTimeout(d_socket, remote, timeout);
+    }
+#else
+    SConnectWithTimeout(d_socket, remote, timeout);
+#endif /* MSG_FASTOPEN */
+
+    if (d_conn) {
+      d_conn->connect(fastOpen, remote, timeout);
     }
   }
 
@@ -216,7 +315,7 @@ public:
      return Done when toRead bytes have been read, needRead or needWrite if the IO operation
      would block.
   */
-  IOState tryRead(std::vector<uint8_t>& buffer, size_t& pos, size_t toRead)
+  IOState tryRead(PacketBuffer& buffer, size_t& pos, size_t toRead)
   {
     if (buffer.size() < toRead || pos >= toRead) {
       throw std::out_of_range("Calling tryRead() with a too small buffer (" + std::to_string(buffer.size()) + ") for a read of " + std::to_string(toRead - pos) + " bytes starting at " + std::to_string(pos));
@@ -253,7 +352,7 @@ public:
      return Done when toWrite bytes have been written, needRead or needWrite if the IO operation
      would block.
   */
-  IOState tryWrite(std::vector<uint8_t>& buffer, size_t& pos, size_t toWrite)
+  IOState tryWrite(const PacketBuffer& buffer, size_t& pos, size_t toWrite)
   {
     if (buffer.size() < toWrite || pos >= toWrite) {
       throw std::out_of_range("Calling tryWrite() with a too small buffer (" + std::to_string(buffer.size()) + ") for a write of " + std::to_string(toWrite - pos) + " bytes starting at " + std::to_string(pos));
@@ -262,8 +361,26 @@ public:
       return d_conn->tryWrite(buffer, pos, toWrite);
     }
 
+#ifdef MSG_FASTOPEN
+    if (d_fastOpen) {
+      int socketFlags = MSG_FASTOPEN;
+      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(&buffer.at(pos)), toWrite - pos, &d_remote, nullptr, 0, socketFlags);
+      if (sent > 0) {
+        d_fastOpen = false;
+        pos += sent;
+      }
+
+      if (pos < toWrite) {
+        return IOState::NeedWrite;
+      }
+
+      return IOState::Done;
+    }
+#endif /* MSG_FASTOPEN */
+
     do {
       ssize_t res = ::write(d_socket, reinterpret_cast<const char*>(&buffer.at(pos)), toWrite - pos);
+
       if (res == 0) {
         throw runtime_error("EOF while sending message");
       }
@@ -288,9 +405,28 @@ public:
     if (d_conn) {
       return d_conn->write(buffer, bufferSize, writeTimeout);
     }
-    else {
-      return writen2WithTimeout(d_socket, buffer, bufferSize, writeTimeout);
+
+#ifdef MSG_FASTOPEN
+    if (d_fastOpen) {
+      int socketFlags = MSG_FASTOPEN;
+      size_t sent = sendMsgWithOptions(d_socket, reinterpret_cast<const char *>(buffer), bufferSize, &d_remote, nullptr, 0, socketFlags);
+      if (sent > 0) {
+        d_fastOpen = false;
+      }
+
+      return sent;
     }
+#endif /* MSG_FASTOPEN */
+
+    return writen2WithTimeout(d_socket, buffer, bufferSize, writeTimeout);
+  }
+
+  bool hasBufferedData() const
+  {
+    if (d_conn) {
+      return d_conn->hasBufferedData();
+    }
+    return false;
   }
 
   std::string getServerNameIndication() const
@@ -324,12 +460,28 @@ public:
     return d_conn && d_conn->getResumedFromInactiveTicketKey();
   }
 
-    bool getUnknownTicketKey() const
+  bool getUnknownTicketKey() const
   {
     return d_conn && d_conn->getUnknownTicketKey();
   }
 
 private:
   std::unique_ptr<TLSConnection> d_conn{nullptr};
+  ComboAddress d_remote;
   int d_socket{-1};
+#ifdef MSG_FASTOPEN
+  bool d_fastOpen{false};
+#endif
 };
+
+struct TLSContextParameters
+{
+  std::string d_provider;
+  std::string d_ciphers;
+  std::string d_ciphers13;
+  std::string d_caStore;
+  bool d_validateCertificates{true};
+};
+
+std::shared_ptr<TLSCtx> getTLSContext(const TLSContextParameters& params);
+
