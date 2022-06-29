@@ -58,6 +58,10 @@ static void patchZone(UeberBackend& B, HttpRequest* req, HttpResponse* resp);
 static const std::set<uint16_t> onlyOneEntryTypes = { QType::CNAME, QType::DNAME, QType::SOA };
 // QTypes that MUST NOT be used with any other QType on the same name.
 static const std::set<uint16_t> exclusiveEntryTypes = { QType::CNAME };
+// QTypes that MUST be at apex.
+static const std::set<uint16_t> atApexTypes = {QType::SOA, QType::DNSKEY};
+// QTypes that are NOT allowed at apex.
+static const std::set<uint16_t> nonApexTypes = {QType::DS};
 
 AuthWebServer::AuthWebServer() :
   d_start(time(nullptr)),
@@ -65,10 +69,10 @@ AuthWebServer::AuthWebServer() :
   d_min5(0),
   d_min1(0)
 {
-  if(arg().mustDo("webserver") || arg().mustDo("api")) {
-    d_ws = unique_ptr<WebServer>(new WebServer(arg()["webserver-address"], arg().asNum("webserver-port")));
-    d_ws->setApiKey(arg()["api-key"]);
-    d_ws->setPassword(arg()["webserver-password"]);
+  if (arg().mustDo("webserver") || arg().mustDo("api")) {
+    d_ws = std::make_unique<WebServer>(arg()["webserver-address"], arg().asNum("webserver-port"));
+    d_ws->setApiKey(arg()["api-key"], arg().mustDo("webserver-hash-plaintext-credentials"));
+    d_ws->setPassword(arg()["webserver-password"], arg().mustDo("webserver-hash-plaintext-credentials"));
     d_ws->setLogLevel(arg()["webserver-loglevel"]);
 
     NetmaskGroup acl;
@@ -283,7 +287,7 @@ void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
     printtable(ret,req->getvars["ring"],S.getRingTitle(req->getvars["ring"]),100);
 
   ret<<"</div></div>"<<endl;
-  ret<<"<footer class=\"row\">"<<fullVersionString()<<"<br>&copy; 2013 - 2021 <a href=\"https://www.powerdns.com/\">PowerDNS.COM BV</a>.</footer>"<<endl;
+  ret<<"<footer class=\"row\">"<<fullVersionString()<<"<br>&copy; 2013 - 2022 <a href=\"https://www.powerdns.com/\">PowerDNS.COM BV</a>.</footer>"<<endl;
   ret<<"</body></html>"<<endl;
 
   resp->body = ret.str();
@@ -344,7 +348,7 @@ static bool shouldDoRRSets(HttpRequest* req) {
   throw ApiException("'rrsets' request parameter value '"+req->getvars["rrsets"]+"' is not supported");
 }
 
-static void fillZone(UeberBackend& B, const DNSName& zonename, HttpResponse* resp, bool doRRSets) {
+static void fillZone(UeberBackend& B, const DNSName& zonename, HttpResponse* resp, HttpRequest* req) {
   DomainInfo di;
   if(!B.getDomainInfo(zonename, di)) {
     throw HttpNotFoundException();
@@ -391,14 +395,24 @@ static void fillZone(UeberBackend& B, const DNSName& zonename, HttpResponse* res
   }
   doc["slave_tsig_key_ids"] = tsig_slave_keys;
 
-  if (doRRSets) {
+  if (shouldDoRRSets(req)) {
     vector<DNSResourceRecord> records;
     vector<Comment> comments;
 
     // load all records + sort
     {
       DNSResourceRecord rr;
-      di.backend->list(zonename, di.id, true); // incl. disabled
+      if (req->getvars.count("rrset_name") == 0) {
+        di.backend->list(zonename, di.id, true); // incl. disabled
+      } else {
+        QType qt;
+        if (req->getvars.count("rrset_type") == 0) {
+          qt = QType::ANY;
+        } else {
+          qt = req->getvars["rrset_type"];
+        }
+        di.backend->lookup(qt, DNSName(req->getvars["rrset_name"]), di.id);
+      }
       while(di.backend->get(rr)) {
         if (!rr.qtype.getCode())
           continue; // skip empty non-terminals
@@ -1385,6 +1399,7 @@ static void gatherRecordsFromZone(const std::string& zonestring, vector<DNSResou
 
   ZoneParserTNG zpt(zonedata, zonename);
   zpt.setMaxGenerateSteps(::arg().asNum("max-generate-steps"));
+  zpt.setMaxIncludes(::arg().asNum("max-include-depth"));
 
   bool seenSOA=false;
 
@@ -1414,7 +1429,8 @@ static void gatherRecordsFromZone(const std::string& zonestring, vector<DNSResou
  *   *) no duplicates for QTypes that can only be present once per RRset
  *   *) hostnames are hostnames
  */
-static void checkNewRecords(vector<DNSResourceRecord>& records) {
+static void checkNewRecords(vector<DNSResourceRecord>& records, const DNSName& zone)
+{
   sort(records.begin(), records.end(),
     [](const DNSResourceRecord& rec_a, const DNSResourceRecord& rec_b) -> bool {
       /* we need _strict_ weak ordering */
@@ -1435,6 +1451,15 @@ static void checkNewRecords(vector<DNSResourceRecord>& records) {
       } else if (exclusiveEntryTypes.count(rec.qtype.getCode()) != 0 || exclusiveEntryTypes.count(previous.qtype.getCode()) != 0) {
         throw ApiException("RRset "+rec.qname.toString()+" IN "+rec.qtype.toString()+": Conflicts with another RRset");
       }
+    }
+
+    if (rec.qname == zone) {
+      if (nonApexTypes.count(rec.qtype.getCode()) != 0) {
+        throw ApiException("Record " + rec.qname.toString() + " IN " + rec.qtype.toString() + " is not allowed at apex");
+      }
+    }
+    else if (atApexTypes.count(rec.qtype.getCode()) != 0) {
+      throw ApiException("Record " + rec.qname.toString() + " IN " + rec.qtype.toString() + " is only allowed at apex");
     }
 
     // Check if the DNSNames that should be hostnames, are hostnames
@@ -1588,6 +1613,56 @@ static void apiServerTSIGKeyDetail(HttpRequest* req, HttpResponse* resp) {
   }
 }
 
+static void apiServerAutoprimaryDetail(HttpRequest* req, HttpResponse* resp) {
+  UeberBackend B;
+  if (req->method == "DELETE") {
+    const AutoPrimary primary(req->parameters["ip"], req->parameters["nameserver"], "");
+    if (!B.autoPrimaryRemove(primary))
+       throw HttpInternalServerErrorException("Cannot find backend with autoprimary feature");
+    resp->body = "";
+    resp->status = 204;
+  } else {
+    throw HttpMethodNotAllowedException();
+  }
+}
+
+static void apiServerAutoprimaries(HttpRequest* req, HttpResponse* resp) {
+  UeberBackend B;
+
+  if (req->method == "GET") {
+    std::vector<AutoPrimary> primaries;
+    if (!B.autoPrimariesList(primaries))
+      throw HttpInternalServerErrorException("Unable to retrieve autoprimaries");
+    Json::array doc;
+    for (const auto& primary: primaries) {
+      Json::object obj = {
+        { "ip", primary.ip },
+        { "nameserver", primary.nameserver },
+        { "account", primary.account }
+      };
+      doc.push_back(obj);
+    }
+    resp->setJsonBody(doc);
+  } else if (req->method == "POST") {
+    auto document = req->json();
+    AutoPrimary primary(stringFromJson(document, "ip"), stringFromJson(document, "nameserver"), "");
+
+    if (document["account"].is_string()) {
+      primary.account = document["account"].string_value();
+    }
+
+    if (primary.ip=="" or primary.nameserver=="") {
+      throw ApiException("ip and nameserver fields must be filled");
+    }
+    if (!B.superMasterAdd(primary))
+      throw HttpInternalServerErrorException("Cannot find backend with autoprimary feature");
+    resp->body = "";
+    resp->status = 201;
+  } else {
+    throw HttpMethodNotAllowedException();
+  }
+}
+
 static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
   UeberBackend B;
   DNSSECKeeper dk(&B);
@@ -1704,7 +1779,7 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
       }
     }
 
-    checkNewRecords(new_records);
+    checkNewRecords(new_records, zonename);
 
     if (boolFromJson(document, "dnssec", false)) {
       checkDefaultDNSSECAlgos();
@@ -1752,7 +1827,7 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
 
     g_zoneCache.add(zonename, di.id); // make new zone visible
 
-    fillZone(B, zonename, resp, shouldDoRRSets(req));
+    fillZone(B, zonename, resp, req);
     resp->status = 201;
     return;
   }
@@ -1773,7 +1848,7 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
     }
   } else {
     try {
-      B.getAllDomains(&domains, true); // incl. disabled
+      B.getAllDomains(&domains, true, true); // incl. serial and disabled
     } catch(const PDNSException &e) {
       throw HttpInternalServerErrorException("Could not retrieve all domain information: " + e.reason);
     }
@@ -1829,6 +1904,8 @@ static void apiServerZoneDetail(HttpRequest* req, HttpResponse* resp) {
         throw ApiException("Deleting domain '"+zonename.toString()+"' failed: backend delete failed/unsupported");
 
       di.backend->commitTransaction();
+
+      g_zoneCache.remove(zonename);
     } catch (...) {
       di.backend->abortTransaction();
       throw;
@@ -1846,7 +1923,7 @@ static void apiServerZoneDetail(HttpRequest* req, HttpResponse* resp) {
     patchZone(B, req, resp);
     return;
   } else if (req->method == "GET") {
-    fillZone(B, zonename, resp, shouldDoRRSets(req));
+    fillZone(B, zonename, resp, req);
     return;
   }
   throw HttpMethodNotAllowedException();
@@ -2032,7 +2109,7 @@ static void patchZone(UeberBackend& B, HttpRequest* req, HttpResponse* resp) {
               soa_edit_done = increaseSOARecord(rr, soa_edit_api_kind, soa_edit_kind);
             }
           }
-          checkNewRecords(new_records);
+          checkNewRecords(new_records, zonename);
         }
 
         if (replace_comments) {
@@ -2190,7 +2267,7 @@ static void apiServerSearchData(HttpRequest* req, HttpResponse* resp) {
   map<int,DomainInfo>::iterator val;
   Json::array doc;
 
-  B.getAllDomains(&domains, true);
+  B.getAllDomains(&domains, false, true);
 
   for(const DomainInfo& di: domains)
   {
@@ -2255,7 +2332,21 @@ static void apiServerCacheFlush(HttpRequest* req, HttpResponse* resp) {
 
   DNSName canon = apiNameToDNSName(req->getvars["domain"]);
 
-  uint64_t count = purgeAuthCachesExact(canon);
+  if (g_zoneCache.isEnabled()) {
+    DomainInfo di;
+    UeberBackend B;
+    if (B.getDomainInfo(canon, di, false)) {
+      // zone exists (uncached), add/update it in the zone cache.
+      // Handle this first, to avoid concurrent queries re-populating the other caches.
+      g_zoneCache.add(di.zone, di.id);
+    }
+    else {
+      g_zoneCache.remove(di.zone);
+    }
+  }
+
+  // purge entire zone from cache, not just zone-level records.
+  uint64_t count = purgeAuthCaches(canon.toString() + "$");
   resp->setJsonBody(Json::object {
       { "count", (int) count },
       { "result", "Flushed cache." }
@@ -2336,26 +2427,29 @@ void AuthWebServer::webThread()
   try {
     setThreadName("pdns/webserver");
     if(::arg().mustDo("api")) {
-      d_ws->registerApiHandler("/api/v1/servers/localhost/cache/flush", &apiServerCacheFlush);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/config", &apiServerConfig);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/search-data", &apiServerSearchData);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/statistics", &apiServerStatistics);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/tsigkeys/<id>", &apiServerTSIGKeyDetail);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/tsigkeys", &apiServerTSIGKeys);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/axfr-retrieve", &apiServerZoneAxfrRetrieve);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/cryptokeys/<key_id>", &apiZoneCryptokeys);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/cryptokeys", &apiZoneCryptokeys);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/export", &apiServerZoneExport);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/metadata/<kind>", &apiZoneMetadataKind);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/metadata", &apiZoneMetadata);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/notify", &apiServerZoneNotify);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/rectify", &apiServerZoneRectify);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>", &apiServerZoneDetail);
-      d_ws->registerApiHandler("/api/v1/servers/localhost/zones", &apiServerZones);
-      d_ws->registerApiHandler("/api/v1/servers/localhost", &apiServerDetail);
-      d_ws->registerApiHandler("/api/v1/servers", &apiServer);
-      d_ws->registerApiHandler("/api/docs", &apiDocs);
-      d_ws->registerApiHandler("/api", &apiDiscovery);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/cache/flush", apiServerCacheFlush);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/config", apiServerConfig);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/search-data", apiServerSearchData);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/statistics", apiServerStatistics);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/autoprimaries/<ip>/<nameserver>", &apiServerAutoprimaryDetail);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/autoprimaries", &apiServerAutoprimaries);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/tsigkeys/<id>", apiServerTSIGKeyDetail);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/tsigkeys", apiServerTSIGKeys);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/axfr-retrieve", apiServerZoneAxfrRetrieve);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/cryptokeys/<key_id>", apiZoneCryptokeys);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/cryptokeys", apiZoneCryptokeys);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/export", apiServerZoneExport);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/metadata/<kind>", apiZoneMetadataKind);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/metadata", apiZoneMetadata);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/notify", apiServerZoneNotify);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>/rectify", apiServerZoneRectify);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones/<id>", apiServerZoneDetail);
+      d_ws->registerApiHandler("/api/v1/servers/localhost/zones", apiServerZones);
+      d_ws->registerApiHandler("/api/v1/servers/localhost", apiServerDetail);
+      d_ws->registerApiHandler("/api/v1/servers", apiServer);
+      d_ws->registerApiHandler("/api/v1", apiDiscoveryV1);
+      d_ws->registerApiHandler("/api/docs", apiDocs);
+      d_ws->registerApiHandler("/api", apiDiscovery);
     }
     if (::arg().mustDo("webserver")) {
       d_ws->registerWebHandler("/style.css", [this](HttpRequest *req, HttpResponse *resp){cssfunction(req, resp);});

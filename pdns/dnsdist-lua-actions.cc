@@ -27,12 +27,15 @@
 #include "dnsdist-lua-ffi.hh"
 #include "dnsdist-protobuf.hh"
 #include "dnsdist-kvs.hh"
+#include "dnsdist-svc.hh"
 
 #include "dolog.hh"
 #include "dnstap.hh"
+#include "dnswriter.hh"
 #include "ednsoptions.hh"
 #include "fstrm_logger.hh"
 #include "remote_logger.hh"
+#include "svc-records.hh"
 
 #include <boost/optional/optional_io.hpp>
 
@@ -83,13 +86,12 @@ public:
 class QPSAction : public DNSAction
 {
 public:
-  QPSAction(int limit) : d_qps(limit, limit)
+  QPSAction(int limit) : d_qps(QPSLimiter(limit, limit))
   {
   }
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    std::lock_guard<decltype(d_lock)> guard(d_lock);
-    if (d_qps.check()) {
+    if (d_qps.lock()->check()) {
       return Action::None;
     }
     else {
@@ -98,11 +100,10 @@ public:
   }
   std::string toString() const override
   {
-    return "qps limit to "+std::to_string(d_qps.getRate());
+    return "qps limit to "+std::to_string(d_qps.lock()->getRate());
   }
 private:
-  mutable std::mutex d_lock;
-  QPSLimiter d_qps;
+  mutable LockGuarded<QPSLimiter> d_qps;
 };
 
 class DelayAction : public DNSAction
@@ -181,7 +182,7 @@ TeeAction::~TeeAction()
 
 DNSAction::Action TeeAction::operator()(DNSQuestion* dq, std::string* ruleresult) const
 {
-  if (dq->tcp) {
+  if (dq->overTCP()) {
     d_tcpdrops++;
   }
   else {
@@ -293,11 +294,10 @@ private:
 class QPSPoolAction : public DNSAction
 {
 public:
-  QPSPoolAction(unsigned int limit, const std::string& pool) : d_qps(limit, limit), d_pool(pool) {}
+  QPSPoolAction(unsigned int limit, const std::string& pool) : d_qps(QPSLimiter(limit, limit)), d_pool(pool) {}
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    std::lock_guard<decltype(d_lock)> guard(d_lock);
-    if (d_qps.check()) {
+    if (d_qps.lock()->check()) {
       *ruleresult = d_pool;
       return Action::Pool;
     }
@@ -307,13 +307,12 @@ public:
   }
   std::string toString() const override
   {
-    return "max " +std::to_string(d_qps.getRate())+" to pool "+d_pool;
+    return "max " +std::to_string(d_qps.lock()->getRate())+" to pool "+d_pool;
   }
 
 private:
-  mutable std::mutex d_lock;
-  QPSLimiter d_qps;
-  std::string d_pool;
+  mutable LockGuarded<QPSLimiter> d_qps;
+  const std::string d_pool;
 };
 
 class RCodeAction : public DNSAction
@@ -359,6 +358,97 @@ private:
   uint8_t d_rcode;
 };
 
+class SpoofSVCAction : public DNSAction
+{
+public:
+  SpoofSVCAction(const std::vector<std::pair<int, SVCRecordParameters>>& parameters)
+  {
+    d_payloads.reserve(parameters.size());
+
+    for (const auto& param : parameters) {
+      std::vector<uint8_t> payload;
+      if (!generateSVCPayload(payload, param.second)) {
+        throw std::runtime_error("Unable to generate a valid SVC record from the supplied parameters");
+      }
+
+      d_totalPayloadsSize += payload.size();
+      d_payloads.push_back(std::move(payload));
+
+      for (const auto& hint : param.second.ipv4hints) {
+        d_additionals4.insert({ param.second.target, ComboAddress(hint) });
+      }
+
+      for (const auto& hint : param.second.ipv6hints) {
+        d_additionals6.insert({ param.second.target, ComboAddress(hint) });
+      }
+    }
+  }
+
+  DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
+  {
+    /* it will likely be a bit bigger than that because of additionals */
+    uint16_t numberOfRecords = d_payloads.size();
+    const auto qnameWireLength = dq->qname->wirelength();
+    if (dq->getMaximumSize() < (sizeof(dnsheader) + qnameWireLength + 4 + numberOfRecords*12 /* recordstart */ + d_totalPayloadsSize)) {
+      return Action::None;
+    }
+
+    PacketBuffer newPacket;
+    newPacket.reserve(sizeof(dnsheader) + qnameWireLength + 4 + numberOfRecords*12 /* recordstart */ + d_totalPayloadsSize);
+    GenericDNSPacketWriter<PacketBuffer> pw(newPacket, *dq->qname, dq->qtype);
+    for (const auto& payload : d_payloads) {
+      pw.startRecord(*dq->qname, dq->qtype, d_responseConfig.ttl);
+      pw.xfrBlob(payload);
+      pw.commit();
+    }
+
+    if (newPacket.size() < dq->getMaximumSize()) {
+      for (const auto& additional : d_additionals4) {
+        pw.startRecord(additional.first.isRoot() ? *dq->qname : additional.first, QType::A, d_responseConfig.ttl, QClass::IN, DNSResourceRecord::ADDITIONAL);
+        pw.xfrCAWithoutPort(4, additional.second);
+        pw.commit();
+      }
+    }
+
+    if (newPacket.size() < dq->getMaximumSize()) {
+      for (const auto& additional : d_additionals6) {
+        pw.startRecord(additional.first.isRoot() ? *dq->qname : additional.first, QType::AAAA, d_responseConfig.ttl, QClass::IN, DNSResourceRecord::ADDITIONAL);
+        pw.xfrCAWithoutPort(6, additional.second);
+        pw.commit();
+      }
+    }
+
+    if (g_addEDNSToSelfGeneratedResponses && queryHasEDNS(*dq)) {
+      bool dnssecOK = getEDNSZ(*dq) & EDNS_HEADER_FLAG_DO;
+      pw.addOpt(g_PayloadSizeSelfGenAnswers, 0, dnssecOK ? EDNS_HEADER_FLAG_DO : 0);
+      pw.commit();
+    }
+
+    if (newPacket.size() >= dq->getMaximumSize()) {
+      /* sorry! */
+      return Action::None;
+    }
+
+    pw.getHeader()->id = dq->getHeader()->id;
+    pw.getHeader()->qr = true; // for good measure
+    setResponseHeadersFromConfig(*pw.getHeader(), d_responseConfig);
+    dq->getMutableData() = std::move(newPacket);
+
+    return Action::HeaderModify;
+  }
+  std::string toString() const override
+  {
+    return "spoof SVC record ";
+  }
+
+  ResponseConfig d_responseConfig;
+private:
+  std::vector<std::vector<uint8_t>> d_payloads;
+  std::set<std::pair<DNSName, ComboAddress>> d_additionals4;
+  std::set<std::pair<DNSName, ComboAddress>> d_additionals6;
+  size_t d_totalPayloadsSize{0};
+};
+
 class TCAction : public DNSAction
 {
 public:
@@ -381,7 +471,7 @@ public:
 
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    std::lock_guard<std::mutex> lock(g_luamutex);
+    auto lock = g_lua.lock();
     try {
       auto ret = d_func(dq);
       if (ruleresult) {
@@ -418,7 +508,7 @@ public:
   {}
   DNSResponseAction::Action operator()(DNSResponse* dr, std::string* ruleresult) const override
   {
-    std::lock_guard<std::mutex> lock(g_luamutex);
+    auto lock = g_lua.lock();
     try {
       auto ret = d_func(dr);
       if (ruleresult) {
@@ -460,8 +550,7 @@ public:
   {
     dnsdist_ffi_dnsquestion_t dqffi(dq);
     try {
-      std::lock_guard<std::mutex> lock(g_luamutex);
-
+      auto lock = g_lua.lock();
       auto ret = d_func(&dqffi);
       if (ruleresult) {
         if (dqffi.result) {
@@ -489,6 +578,74 @@ private:
   func_t d_func;
 };
 
+class LuaFFIPerThreadAction: public DNSAction
+{
+public:
+  typedef std::function<int(dnsdist_ffi_dnsquestion_t* dq)> func_t;
+
+  LuaFFIPerThreadAction(const std::string& code): d_functionCode(code), d_functionID(s_functionsCounter++)
+  {
+  }
+
+  DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
+  {
+    try {
+      auto& state = t_perThreadStates[d_functionID];
+      if (!state.d_initialized) {
+        setupLuaFFIPerThreadContext(state.d_luaContext);
+        /* mark the state as initialized first so if there is a syntax error
+           we only try to execute the code once */
+        state.d_initialized = true;
+        state.d_func = state.d_luaContext.executeCode<func_t>(d_functionCode);
+      }
+
+      if (!state.d_func) {
+        /* the function was not properly initialized */
+        return DNSAction::Action::None;
+      }
+
+      dnsdist_ffi_dnsquestion_t dqffi(dq);
+      auto ret = state.d_func(&dqffi);
+      if (ruleresult) {
+        if (dqffi.result) {
+          *ruleresult = *dqffi.result;
+        }
+        else {
+          // default to empty string
+          ruleresult->clear();
+        }
+      }
+      return static_cast<DNSAction::Action>(ret);
+    }
+    catch (const std::exception &e) {
+      warnlog("LuaFFIPerThreadAction failed inside Lua, returning ServFail: %s", e.what());
+    }
+    catch (...) {
+      warnlog("LuaFFIPerthreadAction failed inside Lua, returning ServFail: [unknown exception]");
+    }
+    return DNSAction::Action::ServFail;
+  }
+
+  string toString() const override
+  {
+    return "Lua FFI per-thread script";
+  }
+
+private:
+  struct PerThreadState
+  {
+    LuaContext d_luaContext;
+    func_t d_func;
+    bool d_initialized{false};
+  };
+  static std::atomic<uint64_t> s_functionsCounter;
+  static thread_local std::map<uint64_t, PerThreadState> t_perThreadStates;
+  const std::string d_functionCode;
+  const uint64_t d_functionID;
+};
+
+std::atomic<uint64_t> LuaFFIPerThreadAction::s_functionsCounter = 0;
+thread_local std::map<uint64_t, LuaFFIPerThreadAction::PerThreadState> LuaFFIPerThreadAction::t_perThreadStates;
 
 class LuaFFIResponseAction: public DNSResponseAction
 {
@@ -508,8 +665,7 @@ public:
 
     dnsdist_ffi_dnsquestion_t dqffi(dq);
     try {
-      std::lock_guard<std::mutex> lock(g_luamutex);
-
+      auto lock = g_lua.lock();
       auto ret = d_func(&dqffi);
       if (ruleresult) {
         if (dqffi.result) {
@@ -536,6 +692,81 @@ public:
 private:
   func_t d_func;
 };
+
+class LuaFFIPerThreadResponseAction: public DNSResponseAction
+{
+public:
+  typedef std::function<int(dnsdist_ffi_dnsquestion_t* dq)> func_t;
+
+  LuaFFIPerThreadResponseAction(const std::string& code): d_functionCode(code), d_functionID(s_functionsCounter++)
+  {
+  }
+
+  DNSResponseAction::Action operator()(DNSResponse* dr, std::string* ruleresult) const override
+  {
+    DNSQuestion* dq = dynamic_cast<DNSQuestion*>(dr);
+    if (dq == nullptr) {
+      return DNSResponseAction::Action::ServFail;
+    }
+
+    try {
+      auto& state = t_perThreadStates[d_functionID];
+      if (!state.d_initialized) {
+        setupLuaFFIPerThreadContext(state.d_luaContext);
+        /* mark the state as initialized first so if there is a syntax error
+           we only try to execute the code once */
+        state.d_initialized = true;
+        state.d_func = state.d_luaContext.executeCode<func_t>(d_functionCode);
+      }
+
+      if (!state.d_func) {
+        /* the function was not properly initialized */
+        return DNSResponseAction::Action::None;
+      }
+
+      dnsdist_ffi_dnsquestion_t dqffi(dq);
+      auto ret = state.d_func(&dqffi);
+      if (ruleresult) {
+        if (dqffi.result) {
+          *ruleresult = *dqffi.result;
+        }
+        else {
+          // default to empty string
+          ruleresult->clear();
+        }
+      }
+      return static_cast<DNSResponseAction::Action>(ret);
+    }
+    catch (const std::exception &e) {
+      warnlog("LuaFFIPerThreadResponseAction failed inside Lua, returning ServFail: %s", e.what());
+    }
+    catch (...) {
+      warnlog("LuaFFIPerthreadResponseAction failed inside Lua, returning ServFail: [unknown exception]");
+    }
+    return DNSResponseAction::Action::ServFail;
+  }
+
+  string toString() const override
+  {
+    return "Lua FFI per-thread script";
+  }
+
+private:
+  struct PerThreadState
+  {
+    LuaContext d_luaContext;
+    func_t d_func;
+    bool d_initialized{false};
+  };
+
+  static std::atomic<uint64_t> s_functionsCounter;
+  static thread_local std::map<uint64_t, PerThreadState> t_perThreadStates;
+  const std::string d_functionCode;
+  const uint64_t d_functionID;
+};
+
+std::atomic<uint64_t> LuaFFIPerThreadResponseAction::s_functionsCounter = 0;
+thread_local std::map<uint64_t, LuaFFIPerThreadResponseAction::PerThreadState> LuaFFIPerThreadResponseAction::t_perThreadStates;
 
 thread_local std::default_random_engine SpoofAction::t_randomEngine;
 
@@ -585,7 +816,7 @@ DNSAction::Action SpoofAction::operator()(DNSQuestion* dq, std::string* ruleresu
   }
 
   unsigned int qnameWireLength=0;
-  DNSName ignore((char*)dq->getData().data(), dq->getData().size(), sizeof(dnsheader), false, 0, 0, &qnameWireLength);
+  DNSName ignore(reinterpret_cast<const char*>(dq->getData().data()), dq->getData().size(), sizeof(dnsheader), false, 0, 0, &qnameWireLength);
 
   if (dq->getMaximumSize() < (sizeof(dnsheader) + qnameWireLength + 4 + numberOfRecords*12 /* recordstart */ + totrdatalen)) {
     return Action::None;
@@ -657,7 +888,7 @@ DNSAction::Action SpoofAction::operator()(DNSQuestion* dq, std::string* ruleresu
       dest += sizeof(recordstart);
 
       memcpy(dest,
-             addr.sin4.sin_family == AF_INET ? (void*)&addr.sin4.sin_addr.s_addr : (void*)&addr.sin6.sin6_addr.s6_addr,
+             addr.sin4.sin_family == AF_INET ? reinterpret_cast<const void*>(&addr.sin4.sin_addr.s_addr) : reinterpret_cast<const void*>(&addr.sin6.sin6_addr.s6_addr),
              addr.sin4.sin_family == AF_INET ? sizeof(addr.sin4.sin_addr.s_addr) : sizeof(addr.sin6.sin6_addr.s6_addr));
       dest += (addr.sin4.sin_family == AF_INET ? sizeof(addr.sin4.sin_addr.s_addr) : sizeof(addr.sin6.sin6_addr.s6_addr));
       dq->getHeader()->ancount++;
@@ -678,13 +909,11 @@ class SetMacAddrAction : public DNSAction
 public:
   // this action does not stop the processing
   SetMacAddrAction(uint16_t code) : d_code(code)
-  {}
+  {
+  }
+
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    if (dq->getHeader()->arcount) {
-      return Action::None;
-    }
-
     std::string mac = getMACAddress(*dq->remote);
     if (mac.empty()) {
       return Action::None;
@@ -693,19 +922,99 @@ public:
     std::string optRData;
     generateEDNSOption(d_code, mac, optRData);
 
+    if (dq->getHeader()->arcount) {
+      bool ednsAdded = false;
+      bool optionAdded = false;
+      PacketBuffer newContent;
+      newContent.reserve(dq->getData().size());
+
+      if (!slowRewriteEDNSOptionInQueryWithRecords(dq->getData(), newContent, ednsAdded, d_code, optionAdded, true, optRData)) {
+        return Action::None;
+      }
+
+      if (newContent.size() > dq->getMaximumSize()) {
+        return Action::None;
+      }
+
+      dq->getMutableData() = std::move(newContent);
+      if (!dq->ednsAdded && ednsAdded) {
+        dq->ednsAdded = true;
+      }
+
+      return Action::None;
+    }
+
     auto& data = dq->getMutableData();
     if (generateOptRR(optRData, data, dq->getMaximumSize(), g_EdnsUDPPayloadSize, 0, false)) {
       dq->getHeader()->arcount = htons(1);
+      // make sure that any EDNS sent by the backend is removed before forwarding the response to the client
+      dq->ednsAdded = true;
     }
 
     return Action::None;
   }
   std::string toString() const override
   {
-    return "add EDNS MAC (code="+std::to_string(d_code)+")";
+    return "add EDNS MAC (code=" + std::to_string(d_code) + ")";
   }
 private:
   uint16_t d_code{3};
+};
+
+
+class SetEDNSOptionAction : public DNSAction
+{
+public:
+  // this action does not stop the processing
+  SetEDNSOptionAction(uint16_t code, const std::string& data) : d_code(code), d_data(data)
+  {
+  }
+
+  DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
+  {
+    std::string optRData;
+    generateEDNSOption(d_code, d_data, optRData);
+
+    if (dq->getHeader()->arcount) {
+      bool ednsAdded = false;
+      bool optionAdded = false;
+      PacketBuffer newContent;
+      newContent.reserve(dq->getData().size());
+
+      if (!slowRewriteEDNSOptionInQueryWithRecords(dq->getData(), newContent, ednsAdded, d_code, optionAdded, true, optRData)) {
+        return Action::None;
+      }
+
+      if (newContent.size() > dq->getMaximumSize()) {
+        return Action::None;
+      }
+
+      dq->getMutableData() = std::move(newContent);
+      if (!dq->ednsAdded && ednsAdded) {
+        dq->ednsAdded = true;
+      }
+
+      return Action::None;
+    }
+
+    auto& data = dq->getMutableData();
+    if (generateOptRR(optRData, data, dq->getMaximumSize(), g_EdnsUDPPayloadSize, 0, false)) {
+      dq->getHeader()->arcount = htons(1);
+      // make sure that any EDNS sent by the backend is removed before forwarding the response to the client
+      dq->ednsAdded = true;
+    }
+
+    return Action::None;
+  }
+
+  std::string toString() const override
+  {
+    return "add EDNS Option (code=" + std::to_string(d_code) + ")";
+  }
+
+private:
+  uint16_t d_code;
+  std::string d_data;
 };
 
 class SetNoRecurseAction : public DNSAction
@@ -727,35 +1036,25 @@ class LogAction : public DNSAction, public boost::noncopyable
 {
 public:
   // this action does not stop the processing
-  LogAction(): d_fp(nullptr, fclose)
+  LogAction()
   {
   }
 
-  LogAction(const std::string& str, bool binary=true, bool append=false, bool buffered=true, bool verboseOnly=true, bool includeTimestamp=false): d_fname(str), d_binary(binary), d_verboseOnly(verboseOnly), d_includeTimestamp(includeTimestamp)
+  LogAction(const std::string& str, bool binary=true, bool append=false, bool buffered=true, bool verboseOnly=true, bool includeTimestamp=false): d_fname(str), d_binary(binary), d_verboseOnly(verboseOnly), d_includeTimestamp(includeTimestamp), d_append(append), d_buffered(buffered)
   {
     if (str.empty()) {
       return;
     }
 
-    if(append) {
-      d_fp = std::unique_ptr<FILE, int(*)(FILE*)>(fopen(str.c_str(), "a+"), fclose);
-    }
-    else {
-      d_fp = std::unique_ptr<FILE, int(*)(FILE*)>(fopen(str.c_str(), "w"), fclose);
-    }
-
-    if (!d_fp) {
-      throw std::runtime_error("Unable to open file '"+str+"' for logging: "+stringerror());
-    }
-
-    if (!buffered) {
-      setbuf(d_fp.get(), 0);
+    if (!reopenLogFile())  {
+      throw std::runtime_error("Unable to open file '" + str + "' for logging: " + stringerror());
     }
   }
 
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    if (!d_fp) {
+    auto fp = std::atomic_load_explicit(&d_fp, std::memory_order_acquire);
+    if (!fp) {
       if (!d_verboseOnly || g_verbose) {
         if (d_includeTimestamp) {
           infolog("[%u.%u] Packet from %s for %s %s with id %d", static_cast<unsigned long long>(dq->queryTime->tv_sec), static_cast<unsigned long>(dq->queryTime->tv_nsec), dq->remote->toStringWithPort(), dq->qname->toString(), QType(dq->qtype).toString(), dq->getHeader()->id);
@@ -771,28 +1070,28 @@ public:
         if (d_includeTimestamp) {
           uint64_t tv_sec = static_cast<uint64_t>(dq->queryTime->tv_sec);
           uint32_t tv_nsec = static_cast<uint32_t>(dq->queryTime->tv_nsec);
-          fwrite(&tv_sec, sizeof(tv_sec), 1, d_fp.get());
-          fwrite(&tv_nsec, sizeof(tv_nsec), 1, d_fp.get());
+          fwrite(&tv_sec, sizeof(tv_sec), 1, fp.get());
+          fwrite(&tv_nsec, sizeof(tv_nsec), 1, fp.get());
         }
         uint16_t id = dq->getHeader()->id;
-        fwrite(&id, sizeof(id), 1, d_fp.get());
-        fwrite(out.c_str(), 1, out.size(), d_fp.get());
-        fwrite(&dq->qtype, sizeof(dq->qtype), 1, d_fp.get());
-        fwrite(&dq->remote->sin4.sin_family, sizeof(dq->remote->sin4.sin_family), 1, d_fp.get());
+        fwrite(&id, sizeof(id), 1, fp.get());
+        fwrite(out.c_str(), 1, out.size(), fp.get());
+        fwrite(&dq->qtype, sizeof(dq->qtype), 1, fp.get());
+        fwrite(&dq->remote->sin4.sin_family, sizeof(dq->remote->sin4.sin_family), 1, fp.get());
         if (dq->remote->sin4.sin_family == AF_INET) {
-          fwrite(&dq->remote->sin4.sin_addr.s_addr, sizeof(dq->remote->sin4.sin_addr.s_addr), 1, d_fp.get());
+          fwrite(&dq->remote->sin4.sin_addr.s_addr, sizeof(dq->remote->sin4.sin_addr.s_addr), 1, fp.get());
         }
         else if (dq->remote->sin4.sin_family == AF_INET6) {
-          fwrite(&dq->remote->sin6.sin6_addr.s6_addr, sizeof(dq->remote->sin6.sin6_addr.s6_addr), 1, d_fp.get());
+          fwrite(&dq->remote->sin6.sin6_addr.s6_addr, sizeof(dq->remote->sin6.sin6_addr.s6_addr), 1, fp.get());
         }
-        fwrite(&dq->remote->sin4.sin_port, sizeof(dq->remote->sin4.sin_port), 1, d_fp.get());
+        fwrite(&dq->remote->sin4.sin_port, sizeof(dq->remote->sin4.sin_port), 1, fp.get());
       }
       else {
         if (d_includeTimestamp) {
-          fprintf(d_fp.get(), "[%llu.%lu] Packet from %s for %s %s with id %d\n", static_cast<unsigned long long>(dq->queryTime->tv_sec), static_cast<unsigned long>(dq->queryTime->tv_nsec), dq->remote->toStringWithPort().c_str(), dq->qname->toString().c_str(), QType(dq->qtype).toString().c_str(), dq->getHeader()->id);
+          fprintf(fp.get(), "[%llu.%lu] Packet from %s for %s %s with id %d\n", static_cast<unsigned long long>(dq->queryTime->tv_sec), static_cast<unsigned long>(dq->queryTime->tv_nsec), dq->remote->toStringWithPort().c_str(), dq->qname->toString().c_str(), QType(dq->qtype).toString().c_str(), dq->getHeader()->id);
         }
         else {
-          fprintf(d_fp.get(), "Packet from %s for %s %s with id %d\n", dq->remote->toStringWithPort().c_str(), dq->qname->toString().c_str(), QType(dq->qtype).toString().c_str(), dq->getHeader()->id);
+          fprintf(fp.get(), "Packet from %s for %s %s with id %d\n", dq->remote->toStringWithPort().c_str(), dq->qname->toString().c_str(), QType(dq->qtype).toString().c_str(), dq->getHeader()->id);
         }
       }
     }
@@ -806,46 +1105,68 @@ public:
     }
     return "log";
   }
+
+  void reload() override
+  {
+    if (!reopenLogFile()) {
+      warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror());
+    }
+  }
+
 private:
+  bool reopenLogFile()
+  {
+    // we are using a naked pointer here because we don't want fclose to be called
+    // with a nullptr, which would happen if we constructor a shared_ptr with fclose
+    // as a custom deleter and nullptr as a FILE*
+    auto nfp = fopen(d_fname.c_str(), d_append ? "a+" : "w");
+    if (!nfp) {
+      /* don't fall on our sword when reopening */
+      return false;
+    }
+
+    auto fp = std::shared_ptr<FILE>(nfp, fclose);
+    nfp = nullptr;
+
+    if (!d_buffered) {
+      setbuf(fp.get(), 0);
+    }
+
+    std::atomic_store_explicit(&d_fp, fp, std::memory_order_release);
+    return true;
+  }
+
   std::string d_fname;
-  std::unique_ptr<FILE, int(*)(FILE*)> d_fp{nullptr, fclose};
+  std::shared_ptr<FILE> d_fp{nullptr};
   bool d_binary{true};
   bool d_verboseOnly{true};
   bool d_includeTimestamp{false};
+  bool d_append{false};
+  bool d_buffered{true};
 };
 
 class LogResponseAction : public DNSResponseAction, public boost::noncopyable
 {
 public:
-  LogResponseAction(): d_fp(nullptr, fclose)
+  LogResponseAction()
   {
   }
 
-  LogResponseAction(const std::string& str, bool append=false, bool buffered=true, bool verboseOnly=true, bool includeTimestamp=false): d_fname(str), d_verboseOnly(verboseOnly), d_includeTimestamp(includeTimestamp)
+  LogResponseAction(const std::string& str, bool append=false, bool buffered=true, bool verboseOnly=true, bool includeTimestamp=false): d_fname(str), d_verboseOnly(verboseOnly), d_includeTimestamp(includeTimestamp), d_append(append), d_buffered(buffered)
   {
     if (str.empty()) {
       return;
     }
 
-    if (append) {
-      d_fp = std::unique_ptr<FILE, int(*)(FILE*)>(fopen(str.c_str(), "a+"), fclose);
-    }
-    else {
-      d_fp = std::unique_ptr<FILE, int(*)(FILE*)>(fopen(str.c_str(), "w"), fclose);
-    }
-
-    if (!d_fp) {
-      throw std::runtime_error("Unable to open file '"+str+"' for logging: "+stringerror());
-    }
-
-    if (!buffered) {
-      setbuf(d_fp.get(), 0);
+    if (!reopenLogFile()) {
+      throw std::runtime_error("Unable to open file '" + str + "' for logging: " + stringerror());
     }
   }
 
   DNSResponseAction::Action operator()(DNSResponse* dr, std::string* ruleresult) const override
   {
-    if (!d_fp) {
+    auto fp = std::atomic_load_explicit(&d_fp, std::memory_order_acquire);
+    if (!fp) {
       if (!d_verboseOnly || g_verbose) {
         if (d_includeTimestamp) {
           infolog("[%u.%u] Answer to %s for %s %s (%s) with id %d", static_cast<unsigned long long>(dr->queryTime->tv_sec), static_cast<unsigned long>(dr->queryTime->tv_nsec), dr->remote->toStringWithPort(), dr->qname->toString(), QType(dr->qtype).toString(), RCode::to_s(dr->getHeader()->rcode), dr->getHeader()->id);
@@ -857,10 +1178,10 @@ public:
     }
     else {
       if (d_includeTimestamp) {
-        fprintf(d_fp.get(), "[%llu.%lu] Answer to %s for %s %s (%s) with id %d\n", static_cast<unsigned long long>(dr->queryTime->tv_sec), static_cast<unsigned long>(dr->queryTime->tv_nsec), dr->remote->toStringWithPort().c_str(), dr->qname->toString().c_str(), QType(dr->qtype).toString().c_str(), RCode::to_s(dr->getHeader()->rcode).c_str(), dr->getHeader()->id);
+        fprintf(fp.get(), "[%llu.%lu] Answer to %s for %s %s (%s) with id %d\n", static_cast<unsigned long long>(dr->queryTime->tv_sec), static_cast<unsigned long>(dr->queryTime->tv_nsec), dr->remote->toStringWithPort().c_str(), dr->qname->toString().c_str(), QType(dr->qtype).toString().c_str(), RCode::to_s(dr->getHeader()->rcode).c_str(), dr->getHeader()->id);
       }
       else {
-        fprintf(d_fp.get(), "Answer to %s for %s %s (%s) with id %d\n", dr->remote->toStringWithPort().c_str(), dr->qname->toString().c_str(), QType(dr->qtype).toString().c_str(), RCode::to_s(dr->getHeader()->rcode).c_str(), dr->getHeader()->id);
+        fprintf(fp.get(), "Answer to %s for %s %s (%s) with id %d\n", dr->remote->toStringWithPort().c_str(), dr->qname->toString().c_str(), QType(dr->qtype).toString().c_str(), RCode::to_s(dr->getHeader()->rcode).c_str(), dr->getHeader()->id);
       }
     }
     return Action::None;
@@ -873,11 +1194,43 @@ public:
     }
     return "log";
   }
+
+  void reload() override
+  {
+    if (!reopenLogFile()) {
+      warnlog("Unable to open file '%s' for logging: %s", d_fname, stringerror());
+    }
+  }
+
 private:
+  bool reopenLogFile()
+  {
+    // we are using a naked pointer here because we don't want fclose to be called
+    // with a nullptr, which would happen if we constructor a shared_ptr with fclose
+    // as a custom deleter and nullptr as a FILE*
+    auto nfp = fopen(d_fname.c_str(), d_append ? "a+" : "w");
+    if (!nfp) {
+      /* don't fall on our sword when reopening */
+      return false;
+    }
+
+    auto fp = std::shared_ptr<FILE>(nfp, fclose);
+    nfp = nullptr;
+
+    if (!d_buffered) {
+      setbuf(fp.get(), 0);
+    }
+
+    std::atomic_store_explicit(&d_fp, fp, std::memory_order_release);
+    return true;
+  }
+
   std::string d_fname;
-  std::unique_ptr<FILE, int(*)(FILE*)> d_fp{nullptr, fclose};
+  std::shared_ptr<FILE> d_fp{nullptr};
   bool d_verboseOnly{true};
   bool d_includeTimestamp{false};
+  bool d_append{false};
+  bool d_buffered{true};
 };
 
 
@@ -1043,6 +1396,28 @@ private:
   bool d_hasV6;
 };
 
+static DnstapMessage::ProtocolType ProtocolToDNSTap(dnsdist::Protocol protocol)
+{
+  if (protocol == dnsdist::Protocol::DoUDP) {
+    return DnstapMessage::ProtocolType::DoUDP;
+  }
+  else if (protocol == dnsdist::Protocol::DoTCP) {
+    return DnstapMessage::ProtocolType::DoTCP;
+  }
+  else if (protocol == dnsdist::Protocol::DoT) {
+    return DnstapMessage::ProtocolType::DoT;
+  }
+  else if (protocol == dnsdist::Protocol::DoH) {
+    return DnstapMessage::ProtocolType::DoH;
+  }
+  else if (protocol == dnsdist::Protocol::DNSCryptUDP) {
+    return DnstapMessage::ProtocolType::DNSCryptUDP;
+  }
+  else if (protocol == dnsdist::Protocol::DNSCryptTCP) {
+    return DnstapMessage::ProtocolType::DNSCryptTCP;
+  }
+  throw std::runtime_error("Unhandled protocol for dnstap: " + protocol.toPrettyString());
+}
 
 class DnstapLogAction : public DNSAction, public boost::noncopyable
 {
@@ -1056,10 +1431,11 @@ public:
     static thread_local std::string data;
     data.clear();
 
-    DnstapMessage message(data, !dq->getHeader()->qr ? DnstapMessage::MessageType::client_query : DnstapMessage::MessageType::client_response, d_identity, dq->remote, dq->local, dq->tcp, reinterpret_cast<const char*>(dq->getData().data()), dq->getData().size(), dq->queryTime, nullptr);
+    DnstapMessage::ProtocolType protocol = ProtocolToDNSTap(dq->getProtocol());
+    DnstapMessage message(data, !dq->getHeader()->qr ? DnstapMessage::MessageType::client_query : DnstapMessage::MessageType::client_response, d_identity, dq->remote, dq->local, protocol, reinterpret_cast<const char*>(dq->getData().data()), dq->getData().size(), dq->queryTime, nullptr);
     {
       if (d_alterFunc) {
-        std::lock_guard<std::mutex> lock(g_luamutex);
+        auto lock = g_lua.lock();
         (*d_alterFunc)(dq, &message);
       }
     }
@@ -1104,7 +1480,7 @@ public:
 #endif /* HAVE_LIBCRYPTO */
 
     if (d_alterFunc) {
-      std::lock_guard<std::mutex> lock(g_luamutex);
+      auto lock = g_lua.lock();
       (*d_alterFunc)(dq, &message);
     }
 
@@ -1158,11 +1534,7 @@ public:
   }
   DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
   {
-    if (!dq->qTag) {
-      dq->qTag = std::make_shared<QTag>();
-    }
-
-    dq->qTag->insert({d_tag, d_value});
+    dq->setTag(d_tag, d_value);
 
     return Action::None;
   }
@@ -1189,10 +1561,11 @@ public:
     gettime(&now, true);
     data.clear();
 
-    DnstapMessage message(data, DnstapMessage::MessageType::client_response, d_identity, dr->remote, dr->local, dr->tcp, reinterpret_cast<const char*>(dr->getData().data()), dr->getData().size(), dr->queryTime, &now);
+    DnstapMessage::ProtocolType protocol = ProtocolToDNSTap(dr->getProtocol());
+    DnstapMessage message(data, DnstapMessage::MessageType::client_response, d_identity, dr->remote, dr->local, protocol, reinterpret_cast<const char*>(dr->getData().data()), dr->getData().size(), dr->queryTime, &now);
     {
       if (d_alterFunc) {
-        std::lock_guard<std::mutex> lock(g_luamutex);
+        auto lock = g_lua.lock();
         (*d_alterFunc)(dr, &message);
       }
     }
@@ -1237,7 +1610,7 @@ public:
 #endif /* HAVE_LIBCRYPTO */
 
     if (d_alterFunc) {
-      std::lock_guard<std::mutex> lock(g_luamutex);
+      auto lock = g_lua.lock();
       (*d_alterFunc)(dr, &message);
     }
 
@@ -1337,11 +1710,7 @@ public:
   }
   DNSResponseAction::Action operator()(DNSResponse* dr, std::string* ruleresult) const override
   {
-    if (!dr->qTag) {
-      dr->qTag = std::make_shared<QTag>();
-    }
-
-    dr->qTag->insert({d_tag, d_value});
+    dr->setTag(d_tag, d_value);
 
     return Action::None;
   }
@@ -1441,11 +1810,7 @@ public:
       }
     }
 
-    if (!dq->qTag) {
-      dq->qTag = std::make_shared<QTag>();
-    }
-
-    dq->qTag->insert({d_tag, std::move(result)});
+    dq->setTag(d_tag, std::move(result));
 
     return Action::None;
   }
@@ -1453,6 +1818,40 @@ public:
   std::string toString() const override
   {
     return "lookup key-value store based on '" + d_key->toString() + "' and set the result in tag '" + d_tag + "'";
+  }
+
+private:
+  std::shared_ptr<KeyValueStore> d_kvs;
+  std::shared_ptr<KeyValueLookupKey> d_key;
+  std::string d_tag;
+};
+
+class KeyValueStoreRangeLookupAction : public DNSAction
+{
+public:
+  // this action does not stop the processing
+  KeyValueStoreRangeLookupAction(std::shared_ptr<KeyValueStore>& kvs, std::shared_ptr<KeyValueLookupKey>& lookupKey, const std::string& destinationTag): d_kvs(kvs), d_key(lookupKey), d_tag(destinationTag)
+  {
+  }
+
+  DNSAction::Action operator()(DNSQuestion* dq, std::string* ruleresult) const override
+  {
+    std::vector<std::string> keys = d_key->getKeys(*dq);
+    std::string result;
+    for (const auto& key : keys) {
+      if (d_kvs->getRangeValue(key, result) == true) {
+        break;
+      }
+    }
+
+    dq->setTag(d_tag, std::move(result));
+
+    return Action::None;
+  }
+
+  std::string toString() const override
+  {
+    return "do a range-based lookup in key-value store based on '" + d_key->toString() + "' and set the result in tag '" + d_tag + "'";
   }
 
 private:
@@ -1681,6 +2080,8 @@ void setupLuaActions(LuaContext& luaCtx)
     });
 
   luaCtx.registerFunction("getStats", &DNSAction::getStats);
+  luaCtx.registerFunction("reload", &DNSAction::reload);
+  luaCtx.registerFunction("reload", &DNSResponseAction::reload);
 
   luaCtx.writeFunction("LuaAction", [](LuaAction::func_t func) {
       setLuaSideEffect();
@@ -1690,6 +2091,11 @@ void setupLuaActions(LuaContext& luaCtx)
   luaCtx.writeFunction("LuaFFIAction", [](LuaFFIAction::func_t func) {
       setLuaSideEffect();
       return std::shared_ptr<DNSAction>(new LuaFFIAction(func));
+    });
+
+  luaCtx.writeFunction("LuaFFIPerThreadAction", [](std::string code) {
+      setLuaSideEffect();
+      return std::shared_ptr<DNSAction>(new LuaFFIPerThreadAction(code));
     });
 
   luaCtx.writeFunction("SetNoRecurseAction", []() {
@@ -1703,6 +2109,10 @@ void setupLuaActions(LuaContext& luaCtx)
 
   luaCtx.writeFunction("SetMacAddrAction", [](int code) {
       return std::shared_ptr<DNSAction>(new SetMacAddrAction(code));
+    });
+
+  luaCtx.writeFunction("SetEDNSOptionAction", [](int code, const std::string& data) {
+      return std::shared_ptr<DNSAction>(new SetEDNSOptionAction(code, data));
     });
 
   luaCtx.writeFunction("MacAddrAction", [](int code) {
@@ -1735,6 +2145,13 @@ void setupLuaActions(LuaContext& luaCtx)
 
       auto ret = std::shared_ptr<DNSAction>(new SpoofAction(addrs));
       auto sa = std::dynamic_pointer_cast<SpoofAction>(ret);
+      parseResponseConfig(vars, sa->d_responseConfig);
+      return ret;
+    });
+
+  luaCtx.writeFunction("SpoofSVCAction", [](const std::vector<std::pair<int, SVCRecordParameters>>& parameters, boost::optional<responseParams_t> vars) {
+      auto ret = std::shared_ptr<DNSAction>(new SpoofSVCAction(parameters));
+      auto sa = std::dynamic_pointer_cast<SpoofSVCAction>(ret);
       parseResponseConfig(vars, sa->d_responseConfig);
       return ret;
     });
@@ -1856,6 +2273,11 @@ void setupLuaActions(LuaContext& luaCtx)
   luaCtx.writeFunction("LuaFFIResponseAction", [](LuaFFIResponseAction::func_t func) {
       setLuaSideEffect();
       return std::shared_ptr<DNSResponseAction>(new LuaFFIResponseAction(func));
+    });
+
+  luaCtx.writeFunction("LuaFFIPerThreadResponseAction", [](std::string code) {
+      setLuaSideEffect();
+      return std::shared_ptr<DNSResponseAction>(new LuaFFIPerThreadResponseAction(code));
     });
 
   luaCtx.writeFunction("RemoteLogAction", [](std::shared_ptr<RemoteLoggerInterface> logger, boost::optional<std::function<void(DNSQuestion*, DNSDistProtoBufMessage*)> > alterFunc, boost::optional<std::unordered_map<std::string, std::string>> vars) {
@@ -2001,6 +2423,10 @@ void setupLuaActions(LuaContext& luaCtx)
 
   luaCtx.writeFunction("KeyValueStoreLookupAction", [](std::shared_ptr<KeyValueStore>& kvs, std::shared_ptr<KeyValueLookupKey>& lookupKey, const std::string& destinationTag) {
       return std::shared_ptr<DNSAction>(new KeyValueStoreLookupAction(kvs, lookupKey, destinationTag));
+    });
+
+  luaCtx.writeFunction("KeyValueStoreRangeLookupAction", [](std::shared_ptr<KeyValueStore>& kvs, std::shared_ptr<KeyValueLookupKey>& lookupKey, const std::string& destinationTag) {
+      return std::shared_ptr<DNSAction>(new KeyValueStoreRangeLookupAction(kvs, lookupKey, destinationTag));
     });
 
   luaCtx.writeFunction("NegativeAndSOAAction", [](bool nxd, const std::string& zone, uint32_t ttl, const std::string& mname, const std::string& rname, uint32_t serial, uint32_t refresh, uint32_t retry, uint32_t expire, uint32_t minimum, boost::optional<responseParams_t> vars) {

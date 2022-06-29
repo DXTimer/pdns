@@ -41,8 +41,8 @@ static void usage()
           "[dnssec] [ednssubnet SUBNET/MASK] [hidesoadetails] [hidettl] [recurse] [showflags] "
           "[tcp] [dot] [insecure] [fastOpen] [subjectName name] [caStore file] [tlsProvider openssl|gnutls] "
           "[xpf XPFDATA] [class CLASSNUM] "
-          "[proxy UDP(0)/TCP(1) SOURCE-IP-ADDRESS-AND-PORT DESTINATION-IP-ADDRESS-AND-PORT]"
-          "dumpluaraw"
+          "[proxy UDP(0)/TCP(1) SOURCE-IP-ADDRESS-AND-PORT DESTINATION-IP-ADDRESS-AND-PORT] "
+          "[dumpluaraw] [opcode OPNUM]"
        << endl;
 }
 
@@ -60,9 +60,9 @@ static void fillPacket(vector<uint8_t>& packet, const string& q, const string& t
                        bool dnssec, const boost::optional<Netmask> ednsnm,
                        bool recurse, uint16_t xpfcode, uint16_t xpfversion,
                        uint64_t xpfproto, char* xpfsrc, char* xpfdst,
-                       QClass qclass, uint16_t qid)
+                       QClass qclass, uint8_t opcode, uint16_t qid)
 {
-  DNSPacketWriter pw(packet, DNSName(q), DNSRecordContent::TypeToNumber(t), qclass);
+  DNSPacketWriter pw(packet, DNSName(q), DNSRecordContent::TypeToNumber(t), qclass, opcode);
 
   if (dnssec || ednsnm || getenv("SDIGBUFSIZE")) {
     char* sbuf = getenv("SDIGBUFSIZE");
@@ -75,8 +75,7 @@ static void fillPacket(vector<uint8_t>& packet, const string& q, const string& t
     if (ednsnm) {
       EDNSSubnetOpts eo;
       eo.source = *ednsnm;
-      opts.push_back(
-        make_pair(EDNSOptionCode::ECS, makeEDNSSubnetOptsString(eo)));
+      opts.emplace_back(EDNSOptionCode::ECS, makeEDNSSubnetOptsString(eo));
     }
 
     pw.addOpt(bufsize, 0, dnssec ? EDNSOpts::DNSSECOK : 0, opts);
@@ -197,7 +196,7 @@ static void printReply(const string& reply, bool showflags, bool hidesoadetails,
 int main(int argc, char** argv)
 try {
   /* default timeout of 10s */
-  int timeout = 10;
+  struct timeval timeout{10,0};
   bool dnssec = false;
   bool recurse = false;
   bool tcp = false;
@@ -212,6 +211,7 @@ try {
   uint16_t xpfcode = 0, xpfversion = 0, xpfproto = 0;
   char *xpfsrc = NULL, *xpfdst = NULL;
   QClass qclass = QClass::IN;
+  uint8_t opcode = 0;
   string proxyheader;
   string subjectName;
   string caStore;
@@ -281,6 +281,13 @@ try {
           exit(EXIT_FAILURE);
         }
         qclass = atoi(argv[++i]);
+      }
+      else if (strcmp(argv[i], "opcode") == 0) {
+        if (argc < i+2) {
+          cerr << "opcode needs an argument"<<endl;
+          exit(EXIT_FAILURE);
+        }
+        opcode = atoi(argv[++i]);
       }
       else if (strcmp(argv[i], "subjectName") == 0) {
         if (argc < i + 2) {
@@ -356,10 +363,10 @@ try {
     while (getline(std::cin, line)) {
       auto fields = splitField(line, ' ');
 
-      questions.push_back(make_pair(fields.first, fields.second));
+      questions.emplace_back(fields.first, fields.second);
     }
   } else {
-    questions.push_back(make_pair(name, type));
+    questions.emplace_back(name, type);
   }
 
   if (doh) {
@@ -367,14 +374,14 @@ try {
     vector<uint8_t> packet;
     s_expectedIDs.insert(0);
     fillPacket(packet, name, type, dnssec, ednsnm, recurse, xpfcode, xpfversion,
-               xpfproto, xpfsrc, xpfdst, qclass, 0);
+               xpfproto, xpfsrc, xpfdst, qclass, opcode, 0);
     MiniCurl mc;
     MiniCurl::MiniCurlHeaders mch;
-    mch.insert(std::make_pair("Content-Type", "application/dns-message"));
-    mch.insert(std::make_pair("Accept", "application/dns-message"));
+    mch.emplace("Content-Type", "application/dns-message");
+    mch.emplace("Accept", "application/dns-message");
     string question(packet.begin(), packet.end());
     // FIXME: how do we use proxyheader here?
-    reply = mc.postURL(argv[1], question, mch, timeout, fastOpen);
+    reply = mc.postURL(argv[1], question, mch, timeout.tv_sec, fastOpen);
     printReply(reply, showflags, hidesoadetails, dumpluaraw);
 #else
     throw PDNSException("please link sdig against libcurl for DoH support");
@@ -409,6 +416,7 @@ try {
     }
     uint16_t counter = 0;
     Socket sock(dest.sin4.sin_family, SOCK_STREAM);
+    sock.setNonBlocking();
     setTCPNoDelay(sock.getHandle()); // disable NAGLE, which does not play nicely with delayed ACKs
     TCPIOHandler handler(subjectName, sock.releaseHandle(), timeout, tlsCtx, time(nullptr));
     handler.connect(fastOpen, dest, timeout);
@@ -421,7 +429,7 @@ try {
       vector<uint8_t> packet;
       s_expectedIDs.insert(counter);
       fillPacket(packet, it.first, it.second, dnssec, ednsnm, recurse, xpfcode,
-                 xpfversion, xpfproto, xpfsrc, xpfdst, qclass, counter);
+                 xpfversion, xpfproto, xpfsrc, xpfdst, qclass, opcode, counter);
       counter++;
 
       // Prefer to do a single write, so that fastopen can send all the data on SYN
@@ -452,12 +460,12 @@ try {
     vector<uint8_t> packet;
     s_expectedIDs.insert(0);
     fillPacket(packet, name, type, dnssec, ednsnm, recurse, xpfcode, xpfversion,
-               xpfproto, xpfsrc, xpfdst, qclass, 0);
+               xpfproto, xpfsrc, xpfdst, qclass, opcode, 0);
     string question(packet.begin(), packet.end());
     Socket sock(dest.sin4.sin_family, SOCK_DGRAM);
     question = proxyheader + question;
     sock.sendTo(question, dest);
-    int result = waitForData(sock.getHandle(), timeout);
+    int result = waitForData(sock.getHandle(), timeout.tv_sec, timeout.tv_usec);
     if (result < 0)
       throw std::runtime_error("Error waiting for data: " + stringerror());
     if (!result)

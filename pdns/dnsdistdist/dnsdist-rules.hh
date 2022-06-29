@@ -40,18 +40,17 @@ public:
 
   void clear()
   {
-    std::lock_guard<std::mutex> lock(d_lock);
-    d_limits.clear();
+    d_limits.lock()->clear();
   }
 
   size_t cleanup(const struct timespec& cutOff, size_t* scannedCount=nullptr) const
   {
-    std::lock_guard<std::mutex> lock(d_lock);
-    size_t toLook = d_limits.size() / d_scanFraction + 1;
+    auto limits = d_limits.lock();
+    size_t toLook = limits->size() / d_scanFraction + 1;
     size_t lookedAt = 0;
 
     size_t removed = 0;
-    auto& sequence = d_limits.get<SequencedTag>();
+    auto& sequence = limits->get<SequencedTag>();
     for (auto entry = sequence.begin(); entry != sequence.end() && lookedAt < toLook; lookedAt++) {
       if (entry->d_limiter.seenSince(cutOff)) {
         /* entries are ordered from least recently seen to more recently
@@ -98,14 +97,14 @@ public:
     zeroport.sin4.sin_port=0;
     zeroport.truncate(zeroport.sin4.sin_family == AF_INET ? d_ipv4trunc : d_ipv6trunc);
     {
-      std::lock_guard<std::mutex> lock(d_lock);
-      auto iter = d_limits.find(zeroport);
-      if (iter == d_limits.end()) {
+      auto limits = d_limits.lock();
+      auto iter = limits->find(zeroport);
+      if (iter == limits->end()) {
         Entry e(zeroport, QPSLimiter(d_qps, d_burst));
-        iter = d_limits.insert(e).first;
+        iter = limits->insert(e).first;
       }
 
-      moveCacheItemToBack<SequencedTag>(d_limits, iter);
+      moveCacheItemToBack<SequencedTag>(*limits, iter);
       return !iter->d_limiter.check(d_qps, d_burst);
     }
   }
@@ -117,8 +116,7 @@ public:
 
   size_t getEntriesCount() const
   {
-    std::lock_guard<std::mutex> lock(d_lock);
-    return d_limits.size();
+    return d_limits.lock()->size();
   }
 
 private:
@@ -141,8 +139,7 @@ private:
       >
   > qpsContainer_t;
 
-  mutable std::mutex d_lock;
-  mutable qpsContainer_t d_limits;
+  mutable LockGuarded<qpsContainer_t> d_limits;
   mutable struct timespec d_lastCleanup;
   unsigned int d_qps, d_burst, d_ipv4trunc, d_ipv6trunc, d_cleanupDelay, d_expiration;
   unsigned int d_scanFraction{10};
@@ -240,85 +237,80 @@ public:
   }
   bool matches(const DNSQuestion* dq) const override
   {
-    if(dq->remote->sin4.sin_family == AF_INET) {
-      ReadLock rl(&d_lock4);
-      auto fnd = d_ip4s.find(dq->remote->sin4.sin_addr.s_addr);
-      if(fnd == d_ip4s.end()) {
+    if (dq->remote->sin4.sin_family == AF_INET) {
+      auto ip4s = d_ip4s.read_lock();
+      auto fnd = ip4s->find(dq->remote->sin4.sin_addr.s_addr);
+      if (fnd == ip4s->end()) {
         return false;
       }
-      return time(0) < fnd->second;
+      return time(nullptr) < fnd->second;
     } else {
-      ReadLock rl(&d_lock6);
-      auto fnd = d_ip6s.find({*dq->remote});
-      if(fnd == d_ip6s.end()) {
+      auto ip6s = d_ip6s.read_lock();
+      auto fnd = ip6s->find({*dq->remote});
+      if (fnd == ip6s->end()) {
         return false;
       }
-      return time(0) < fnd->second;
+      return time(nullptr) < fnd->second;
     }
   }
 
   void add(const ComboAddress& ca, time_t ttd)
   {
     // think twice before adding templates here
-    if(ca.sin4.sin_family == AF_INET) {
-      WriteLock rl(&d_lock4);
-      auto res=d_ip4s.insert({ca.sin4.sin_addr.s_addr, ttd});
-      if(!res.second && (time_t)res.first->second < ttd)
+    if (ca.sin4.sin_family == AF_INET) {
+      auto res = d_ip4s.write_lock()->insert({ca.sin4.sin_addr.s_addr, ttd});
+      if (!res.second && (time_t)res.first->second < ttd) {
         res.first->second = (uint32_t)ttd;
+      }
     }
     else {
-      WriteLock rl(&d_lock6);
-      auto res=d_ip6s.insert({{ca}, ttd});
-      if(!res.second && (time_t)res.first->second < ttd)
+      auto res = d_ip6s.write_lock()->insert({{ca}, ttd});
+      if (!res.second && (time_t)res.first->second < ttd) {
         res.first->second = (uint32_t)ttd;
+      }
     }
   }
 
   void remove(const ComboAddress& ca)
   {
-    if(ca.sin4.sin_family == AF_INET) {
-      WriteLock rl(&d_lock4);
-      d_ip4s.erase(ca.sin4.sin_addr.s_addr);
+    if (ca.sin4.sin_family == AF_INET) {
+      d_ip4s.write_lock()->erase(ca.sin4.sin_addr.s_addr);
     }
     else {
-      WriteLock rl(&d_lock6);
-      d_ip6s.erase({ca});
+      d_ip6s.write_lock()->erase({ca});
     }
   }
 
   void clear()
   {
-    {
-      WriteLock rl(&d_lock4);
-      d_ip4s.clear();
-    }
-    WriteLock rl(&d_lock6);
-    d_ip6s.clear();
+    d_ip4s.write_lock()->clear();
+    d_ip6s.write_lock()->clear();
   }
 
   void cleanup()
   {
     time_t now = time(nullptr);
     {
-      WriteLock rl(&d_lock4);
-
-      for(auto iter = d_ip4s.begin(); iter != d_ip4s.end(); ) {
-	if(iter->second < now)
-	  iter=d_ip4s.erase(iter);
-	else
+      auto ip4s = d_ip4s.write_lock();
+      for (auto iter = ip4s->begin(); iter != ip4s->end(); ) {
+	if (iter->second < now) {
+	  iter = ip4s->erase(iter);
+        }
+	else {
 	  ++iter;
+        }
       }
-
     }
 
     {
-      WriteLock rl(&d_lock6);
-
-      for(auto iter = d_ip6s.begin(); iter != d_ip6s.end(); ) {
-	if(iter->second < now)
-	  iter=d_ip6s.erase(iter);
-	else
+      auto ip6s = d_ip6s.write_lock();
+      for (auto iter = ip6s->begin(); iter != ip6s->end(); ) {
+	if (iter->second < now) {
+	  iter = ip6s->erase(iter);
+        }
+	else {
 	  ++iter;
+        }
       }
 
     }
@@ -327,19 +319,19 @@ public:
 
   string toString() const override
   {
-    time_t now=time(0);
+    time_t now = time(nullptr);
     uint64_t count = 0;
-    {
-      ReadLock rl(&d_lock4);
-      for(const auto& ip : d_ip4s)
-        if(now < ip.second)
-          ++count;
+
+    for (const auto& ip : *(d_ip4s.read_lock())) {
+      if (now < ip.second) {
+        ++count;
+      }
     }
-    {
-      ReadLock rl(&d_lock6);
-      for(const auto& ip : d_ip6s)
-        if(now < ip.second)
-          ++count;
+
+    for (const auto& ip : *(d_ip6s.read_lock())) {
+      if (now < ip.second) {
+        ++count;
+      }
     }
 
     return "Src: "+std::to_string(count)+" ips";
@@ -354,10 +346,8 @@ private:
       return ah & (bh<<1);
     }
   };
-  std::unordered_map<IPv6, time_t, IPv6Hash> d_ip6s;
-  std::unordered_map<uint32_t, time_t> d_ip4s;
-  mutable ReadWriteLock d_lock4;
-  mutable ReadWriteLock d_lock6;
+  mutable SharedLockGuarded<std::unordered_map<IPv6, time_t, IPv6Hash>> d_ip6s;
+  mutable SharedLockGuarded<std::unordered_map<uint32_t, time_t>> d_ip4s;
 };
 
 
@@ -703,7 +693,7 @@ public:
   }
   bool matches(const DNSQuestion* dq) const override
   {
-    return dq->tcp == d_tcp;
+    return dq->overTCP() == d_tcp;
   }
   string toString() const override
   {
@@ -1092,6 +1082,28 @@ private:
   std::string d_poolname;
 };
 
+class PoolOutstandingRule : public DNSRule
+{
+public:
+  PoolOutstandingRule(const std::string& poolname, const size_t limit) : d_pools(&g_pools), d_poolname(poolname), d_limit(limit)
+  {
+  }
+
+  bool matches(const DNSQuestion* dq) const override
+  {
+    return (getPool(*d_pools, d_poolname)->poolLoad()) > d_limit;
+  }
+
+  string toString() const override
+  {
+    return "pool '" + d_poolname + "' outstanding > " + std::to_string(d_limit);
+  }
+private:
+  mutable LocalStateHolder<pools_t> d_pools;
+  std::string d_poolname;
+  size_t d_limit;
+};
+
 class KeyValueStoreLookupRule: public DNSRule
 {
 public:
@@ -1121,6 +1133,36 @@ private:
   std::shared_ptr<KeyValueLookupKey> d_key;
 };
 
+class KeyValueStoreRangeLookupRule: public DNSRule
+{
+public:
+  KeyValueStoreRangeLookupRule(std::shared_ptr<KeyValueStore>& kvs, std::shared_ptr<KeyValueLookupKey>& lookupKey): d_kvs(kvs), d_key(lookupKey)
+  {
+  }
+
+  bool matches(const DNSQuestion* dq) const override
+  {
+    std::vector<std::string> keys = d_key->getKeys(*dq);
+    for (const auto& key : keys) {
+      std::string value;
+      if (d_kvs->getRangeValue(key, value) == true) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  string toString() const override
+  {
+    return "range-based lookup key-value store based on '" + d_key->toString() + "'";
+  }
+
+private:
+  std::shared_ptr<KeyValueStore> d_kvs;
+  std::shared_ptr<KeyValueLookupKey> d_key;
+};
+
 class LuaRule : public DNSRule
 {
 public:
@@ -1131,7 +1173,7 @@ public:
   bool matches(const DNSQuestion* dq) const override
   {
     try {
-      std::lock_guard<std::mutex> lock(g_luamutex);
+      auto lock = g_lua.lock();
       return d_func(dq);
     } catch (const std::exception &e) {
       warnlog("LuaRule failed inside Lua: %s", e.what());
@@ -1160,7 +1202,7 @@ public:
   {
     dnsdist_ffi_dnsquestion_t dqffi(const_cast<DNSQuestion*>(dq));
     try {
-      std::lock_guard<std::mutex> lock(g_luamutex);
+      auto lock = g_lua.lock();
       return d_func(&dqffi);
     } catch (const std::exception &e) {
       warnlog("LuaFFIRule failed inside Lua: %s", e.what());
@@ -1176,6 +1218,62 @@ public:
   }
 private:
   func_t d_func;
+};
+
+class LuaFFIPerThreadRule : public DNSRule
+{
+public:
+  typedef std::function<bool(dnsdist_ffi_dnsquestion_t* dq)> func_t;
+
+  LuaFFIPerThreadRule(const std::string& code): d_functionCode(code), d_functionID(s_functionsCounter++)
+  {
+  }
+
+  bool matches(const DNSQuestion* dq) const override
+  {
+    try {
+      auto& state = t_perThreadStates[d_functionID];
+      if (!state.d_initialized) {
+        setupLuaFFIPerThreadContext(state.d_luaContext);
+        /* mark the state as initialized first so if there is a syntax error
+           we only try to execute the code once */
+        state.d_initialized = true;
+        state.d_func = state.d_luaContext.executeCode<func_t>(d_functionCode);
+      }
+
+      if (!state.d_func) {
+        /* the function was not properly initialized */
+        return false;
+      }
+
+      dnsdist_ffi_dnsquestion_t dqffi(const_cast<DNSQuestion*>(dq));
+      return state.d_func(&dqffi);
+    }
+    catch (const std::exception &e) {
+      warnlog("LuaFFIPerthreadRule failed inside Lua: %s", e.what());
+    }
+    catch (...) {
+      warnlog("LuaFFIPerThreadRule failed inside Lua: [unknown exception]");
+    }
+    return false;
+  }
+
+  string toString() const override
+  {
+    return "Lua FFI per-thread script";
+  }
+private:
+  struct PerThreadState
+  {
+    LuaContext d_luaContext;
+    func_t d_func;
+    bool d_initialized{false};
+  };
+
+  static std::atomic<uint64_t> s_functionsCounter;
+  static thread_local std::map<uint64_t, PerThreadState> t_perThreadStates;
+  const std::string d_functionCode;
+  const uint64_t d_functionID;
 };
 
 class ProxyProtocolValueRule : public DNSRule

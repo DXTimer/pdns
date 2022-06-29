@@ -16,7 +16,7 @@ Then the key used for the lookup can be selected via one of the following functi
 
  * the exact qname with :func:`KeyValueLookupKeyQName` ;
  * a suffix match via :func:`KeyValueLookupKeySuffix`, meaning that several lookups will be done, removing one label from the qname at a time, until a match has been found or there is no label left ;
- * the source IP with :func:`KeyValueLookupKeySourceIP` ;
+ * the source IP, in network byte order, with :func:`KeyValueLookupKeySourceIP` ;
  * the value of an existing tag with :func:`KeyValueLookupKeyTag`.
 
 For example, to do a suffix-based lookup into a LMDB KVS database, the following rule can be used:
@@ -34,6 +34,7 @@ this would result in the following lookups:
  * \\8powerdns\\3com\\0
 
 Then a match is found for the last key, and the corresponding value is stored into the 'kvs-suffix-result' tag. This tag can now be used in subsequent rules to take an action based on the result of the lookup.
+Note that the tag is also created when the key has not been found, but the content of the tag is empty.
 
 .. code-block:: lua
 
@@ -86,10 +87,14 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
   .. versionchanged:: 1.5.0
     Optional parameters ``v4mask`` and ``v6mask`` added.
 
+  .. versionchanged:: 1.7.0
+    Optional parameter ``includePort`` added.
+
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction` or :func:`KeyValueStoreLookupRule`, will return the source IP of the client in network byte-order.
 
   :param int v4mask: Mask applied to IPv4 addresses. Default is 32 (the whole address)
   :param int v6mask: Mask applied to IPv6 addresses. Default is 128 (the whole address)
+  :param int includePort: Whether to append the port (in network byte-order) after the address. Default is false
 
 .. function:: KeyValueLookupKeySuffix([minLabels [, wireFormat]]) -> KeyValueLookupKey
 
@@ -113,11 +118,13 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
   :param int minLabels: The minimum number of labels to do a lookup for. Default is 0 which means unlimited
   :param bool wireFormat: Whether to do the lookup in wire format (default) or in plain text
 
-.. function:: KeyValueLookupKeyTag() -> KeyValueLookupKey
+.. function:: KeyValueLookupKeyTag(tagName) -> KeyValueLookupKey
 
   .. versionadded:: 1.4.0
 
   Return a new KeyValueLookupKey object that, when passed to :func:`KeyValueStoreLookupAction`, will return the value of the corresponding tag for this query, if it exists.
+
+  :param str tagName: The name of the tag.
 
 .. function:: newCDBKVStore(filename, refreshDelay) -> KeyValueStore
 
@@ -129,12 +136,16 @@ If the value found in the LMDB database for the key '\\8powerdns\\3com\\0' was '
   :param string filename: The path to an existing CDB database
   :param int refreshDelays: The delay in seconds between two checks of the database modification time. 0 means disabled
 
-.. function:: newLMDBKVStore(filename, dbName) -> KeyValueStore
+.. function:: newLMDBKVStore(filename, dbName [, noLock]) -> KeyValueStore
 
   .. versionadded:: 1.4.0
 
+  .. versionchanged:: 1.7.0
+    Added the optional parameter ``noLock``.
+
   Return a new KeyValueStore object associated to the corresponding LMDB database. The database must have been created
-  with the ``MDB_NOSUBDIR`` flag.
+  with the ``MDB_NOSUBDIR`` flag. Since 1.7.0, the database is opened with the ``MDB_READONLY`` flag, and optionally with ``MDB_NOLOCK`` if ``noLock`` is set to true.
 
   :param string filename: The path to an existing LMDB database created with ``MDB_NOSUBDIR``
   :param string dbName: The name of the database to use
+  :param bool noLock: Whether to open the database with the ``MDB_NOLOCK`` flag. Default is false

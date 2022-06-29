@@ -6,7 +6,7 @@ TLS sessions
 
 One of the most costly TLS operation is the negotiation of a new session, since both the client and the server need to generate and agree on cryptographic materials. In order to reduce that cost, TLS implements what is called session resumption, where a client opening a new connection to a server can reuse the cryptographic materials negotiated for a previous TLS session.
 
-The following figures show that, with the same number of established connections and queries per second, the ratio of new TLS sessions and resumed sessions has a huge impact on CPU usage:
+The following figures show that, with the same number of established incoming connections and queries per second, the ratio of new TLS sessions and resumed sessions has a huge impact on CPU usage:
 
 .. figure:: ../imgs/tls_resumptions.png
    :align: center
@@ -23,16 +23,16 @@ The server uses Session Ticket Encryption Key (STEK) to sign and encrypt the inf
 
 Knowing the STEK is all the information needed to be able to decrypt a live TLS session, but also a recorded one, so it is very important to keep that key well-protected. It should never be exchanged in clear-text, and ideally should not be written to persistent storage but be kept in a tmpfs with no swap configured. It should also be regularly rotated to preserve TLS' forward secrecy properties.
 
-Keys management in dnsdist
---------------------------
+Keys management for incoming connections in dnsdist
+---------------------------------------------------
 
-dnsdist supports both server's side (sessions) and client's side (tickets) resumption.
+dnsdist supports both server's side (sessions) and client's side (tickets) resumption for incoming connections (client to dnsdist).
 
 Since server-side sessions cannot be shared between several instances, and pretty much all clients support tickets anyway, we do recommend disabling the sessions by passing ``numberOfStoredSessions=0`` to the :func:`addDOHLocal` (for DNS over HTTPS) and :func:`addTLSLocal` (for DNS over TLS) functions.
 
 By default, dnsdist will generate a new, random STEK at startup and rotate it every 12 hours. It will keep 5 keys in memory, with only the last one marked as active and used to encrypt new tickets while the remaining ones can still be used to decrypt existing tickets after a rotation. The rotation time and the number of keys to keep in memory can be configured via the ``numberOfTicketsKeys`` and ``ticketsKeysRotationDelay`` parameters of the :func:`addDOHLocal` (for DNS over HTTPS) and :func:`addTLSLocal` (for DNS over TLS) functions.
 
-It is also possible to manually request a STEK rotation using the :func:`getDOHFrontend` (DoH) and :func:`getTLSContext` (DoT) functions to retrieve the bind object, and calling its ``rotateTicketsKey`` method (:meth:`DOHFrontend.rotateTicketsKey`, :meth:`TLSContext.rotateTicketsKey`).
+It is also possible to manually request a STEK rotation using the :func:`getDOHFrontend` (DoH) and :func:`getTLSContext` (DoT) functions to retrieve the bind object, and calling its ``rotateTicketsKey`` method (:meth:`DOHFrontend:rotateTicketsKey`, :meth:`TLSContext:rotateTicketsKey`).
 
 The default settings should be fine for most deployments, but generating a random key for every dnsdist instance will not allow resuming the session from a different instance in a cluster. In that case it is possible to generate the STEK outside of dnsdist, write it to a file, distribute it to all instances using something like rsync over SSH, and load that file from dnsdist. Please remember that the STEK contains very sensitive data, and should be well-protected from access by unauthorized users. It means that special care should be taken to setting the right permissions on that file.
 
@@ -49,7 +49,7 @@ The file can then be loaded at startup by using the ``ticketKeyFile`` parameter 
 If the file contains several keys, so for example 240 random bytes, dnsdist will load several STEKs, using the last one for encrypting new tickets and all of them to decrypt existing tickets.
 
 In order to rotate the keys at runtime, it is possible to instruct dnsdist to reload the content of the certificates, keys, and STEKs from the same file used at configuration time, for all DoH and DoH binds, by issuing the :func:`reloadAllCertificates` command.
-It can also be done one bind at a time using the :func:`getDOHFrontend` (DoH) and :func:`getTLSContext` (DoT) functions to retrieve the bind object, and calling its ``loadTicketsKeys`` method (:meth:`DOHFrontend.loadTicketsKeys`, :meth:`TLSContext.loadTicketsKeys`).
+It can also be done one bind at a time using the :func:`getDOHFrontend` (DoH) and :func:`getTLSContext` (DoT) functions to retrieve the bind object, and calling its ``loadTicketsKeys`` method (:meth:`DOHFrontend.loadTicketsKeys`, :meth:`TLSContext:loadTicketsKeys`).
 
 Content of the STEK file
 ------------------------
@@ -65,3 +65,13 @@ For GnuTLS:
 - a 16 bytes binary key identifier
 - a 32 bytes AES 256 key
 - a 16 bytes HMAC SHA-1 key
+
+Sessions management for outgoing connections
+--------------------------------------------
+
+Since 1.7, dnsdist supports securing the connection toward backends using DNS over TLS. For these connections, it keeps a cache of TLS tickets to be able to resume a TLS session quickly. By default that cache contains up to 20 TLS tickets per-backend, is cleaned up every every 60s, and TLS tickets expire if they have not been used after 600 seconds.
+These values can be set at configuration time via:
+
+ * :func:`setOutgoingTLSSessionsCacheMaxTicketsPerBackend`
+ * :func:`setOutgoingTLSSessionsCacheCleanupDelay`
+ * :func:`setOutgoingTLSSessionsCacheMaxTicketValidity`

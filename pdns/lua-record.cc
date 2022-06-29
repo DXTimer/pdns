@@ -1,10 +1,10 @@
 #include <thread>
 #include <future>
-#include <mutex>
 #include <boost/format.hpp>
 #include <utility>
 #include "version.hh"
 #include "ext/luawrapper/include/LuaContext.hpp"
+#include "lock.hh"
 #include "lua-auth4.hh"
 #include "sstuff.hh"
 #include "minicurl.hh"
@@ -73,7 +73,6 @@ private:
     std::atomic<time_t> lastAccess{0};
   };
 
-  ReadWriteLock d_lock;
 public:
   IsUpOracle()
   {
@@ -88,6 +87,7 @@ public:
 private:
   void checkURL(const CheckDesc& cd, const bool status, const bool first = false)
   {
+    string remstring;
     try {
       int timeout = 2;
       if (cd.opts.count("timeout")) {
@@ -100,24 +100,33 @@ private:
       MiniCurl mc(useragent);
 
       string content;
+      const ComboAddress* rem = nullptr;
+      if(cd.rem.sin4.sin_family != AF_UNSPEC) {
+        rem = &cd.rem;
+        remstring = rem->toString();
+      } else {
+        remstring = "[externally checked IP]";
+      }
+
       if (cd.opts.count("source")) {
         ComboAddress src(cd.opts.at("source"));
-        content=mc.getURL(cd.url, &cd.rem, &src, timeout);
+        content=mc.getURL(cd.url, rem, &src, timeout);
       }
       else {
-        content=mc.getURL(cd.url, &cd.rem, nullptr, timeout);
+        content=mc.getURL(cd.url, rem, nullptr, timeout);
       }
       if (cd.opts.count("stringmatch") && content.find(cd.opts.at("stringmatch")) == string::npos) {
         throw std::runtime_error(boost::str(boost::format("unable to match content with `%s`") % cd.opts.at("stringmatch")));
       }
+
       if(!status) {
-        g_log<<Logger::Info<<"LUA record monitoring declaring "<<cd.rem.toString()<<" UP for URL "<<cd.url<<"!"<<endl;
+        g_log<<Logger::Info<<"LUA record monitoring declaring "<<remstring<<" UP for URL "<<cd.url<<"!"<<endl;
       }
       setUp(cd);
     }
     catch(std::exception& ne) {
       if(status || first)
-        g_log<<Logger::Info<<"LUA record monitoring declaring "<<cd.rem.toString()<<" DOWN for URL "<<cd.url<<", error: "<<ne.what()<<endl;
+        g_log<<Logger::Info<<"LUA record monitoring declaring "<<remstring<<" DOWN for URL "<<cd.url<<", error: "<<ne.what()<<endl;
       setDown(cd);
     }
   }
@@ -158,8 +167,9 @@ private:
       std::vector<std::future<void>> results;
       std::vector<CheckDesc> toDelete;
       {
-        ReadLock lock{&d_lock}; // make sure there's no insertion
-        for (auto& it: d_statuses) {
+        // make sure there's no insertion
+        auto statuses = d_statuses.read_lock();
+        for (auto& it: *statuses) {
           auto& desc = it.first;
           auto& state = it.second;
 
@@ -178,9 +188,9 @@ private:
         future.wait();
       }
       if (!toDelete.empty()) {
-        WriteLock lock{&d_lock};
+        auto statuses = d_statuses.write_lock();
         for (auto& it: toDelete) {
-          d_statuses.erase(it);
+          statuses->erase(it);
         }
       }
       std::this_thread::sleep_until(checkStart + std::chrono::seconds(g_luaHealthChecksInterval));
@@ -188,14 +198,14 @@ private:
   }
 
   typedef map<CheckDesc, std::unique_ptr<CheckState>> statuses_t;
-  statuses_t d_statuses;
+  SharedLockGuarded<statuses_t> d_statuses;
 
   std::unique_ptr<std::thread> d_checkerThread;
 
   void setStatus(const CheckDesc& cd, bool status)
   {
-    ReadLock lock{&d_lock};
-    auto& state = d_statuses[cd];
+    auto statuses = d_statuses.write_lock();
+    auto& state = (*statuses)[cd];
     state->status = status;
     if (state->first) {
       state->first = false;
@@ -229,13 +239,13 @@ private:
 bool IsUpOracle::isUp(const CheckDesc& cd)
 {
   if (!d_checkerThread) {
-    d_checkerThread = std::unique_ptr<std::thread>(new std::thread(&IsUpOracle::checkThread, this));
+    d_checkerThread = std::make_unique<std::thread>([this] { return checkThread(); });
   }
   time_t now = time(nullptr);
   {
-    ReadLock lock{&d_lock};
-    auto iter = d_statuses.find(cd);
-    if (iter != d_statuses.end()) {
+    auto statuses = d_statuses.read_lock();
+    auto iter = statuses->find(cd);
+    if (iter != statuses->end()) {
       iter->second->lastAccess = now;
       return iter->second->status;
     }
@@ -245,10 +255,10 @@ bool IsUpOracle::isUp(const CheckDesc& cd)
     ComboAddress src(cd.opts.at("source"));
   }
   {
-    WriteLock lock{&d_lock};
+    auto statuses = d_statuses.write_lock();
     // Make sure we don't insert new entry twice now we have the lock
-    if (d_statuses.find(cd) == d_statuses.end()) {
-      d_statuses[cd] = std::unique_ptr<CheckState>(new CheckState{now});
+    if (statuses->find(cd) == statuses->end()) {
+      (*statuses)[cd] = std::make_unique<CheckState>(now);
     }
   }
   return false;
@@ -326,7 +336,7 @@ static ComboAddress pickwrandom(const vector<pair<int,ComboAddress> >& wips)
   vector<pair<int, ComboAddress> > pick;
   for(auto& i : wips) {
     sum += i.first;
-    pick.push_back({sum, i.second});
+    pick.emplace_back(sum, i.second);
   }
   int r = dns_random(sum);
   auto p = upper_bound(pick.begin(), pick.end(), r, [](int rarg, const decltype(pick)::value_type& a) { return rarg < a.first; });
@@ -443,14 +453,16 @@ static ComboAddress pickclosest(const ComboAddress& bestwho, const vector<ComboA
 
 static std::vector<DNSZoneRecord> lookup(const DNSName& name, uint16_t qtype, int zoneid)
 {
-  static UeberBackend ub;
-  static std::mutex mut;
-  std::lock_guard<std::mutex> lock(mut);
-  ub.lookup(QType(qtype), name, zoneid);
+  static LockGuarded<UeberBackend> s_ub;
+
   DNSZoneRecord dr;
   vector<DNSZoneRecord> ret;
-  while(ub.get(dr)) {
-    ret.push_back(dr);
+  {
+    auto ub = s_ub.lock();
+    ub->lookup(QType(qtype), name, zoneid);
+    while (ub->get(dr)) {
+      ret.push_back(dr);
+    }
   }
   return ret;
 }
@@ -783,6 +795,39 @@ static void setupLuaRecords()
       return convIpListToString(res);
     });
 
+  lua.writeFunction("ifurlextup", [](const vector<pair<int, opts_t> >& ipurls, boost::optional<opts_t> options) {
+      vector<ComboAddress> candidates;
+      opts_t opts;
+      if(options)
+        opts = *options;
+
+      ComboAddress ca_unspec;
+      ca_unspec.sin4.sin_family=AF_UNSPEC;
+
+      // ipurls: { { ["192.0.2.1"] = "https://example.com", ["192.0.2.2"] = "https://example.com/404" } }
+      for (const auto& [count, unitmap] : ipurls) {
+        // unitmap: 1 = { ["192.0.2.1"] = "https://example.com", ["192.0.2.2"] = "https://example.com/404" }
+        vector<ComboAddress> available;
+
+        for (const auto& [ipStr, url] : unitmap) {
+          // unit: ["192.0.2.1"] = "https://example.com"
+          ComboAddress ip(ipStr);
+          candidates.push_back(ip);
+          if (g_up.isUp(ca_unspec, url, opts)) {
+            available.push_back(ip);
+          }
+        }
+        if(!available.empty()) {
+          vector<ComboAddress> res = useSelector(getOptionValue(options, "selector", "random"), s_lua_record_ctx->bestwho, available);
+          return convIpListToString(res);
+        }
+      }
+
+      // All units down, apply backupSelector on all candidates
+      vector<ComboAddress> res = useSelector(getOptionValue(options, "backupSelector", "random"), s_lua_record_ctx->bestwho, candidates);
+      return convIpListToString(res);
+    });
+
   lua.writeFunction("ifurlup", [](const std::string& url,
                                           const boost::variant<iplist_t, ipunitlist_t>& ips,
                                           boost::optional<opts_t> options) {
@@ -970,7 +1015,7 @@ std::vector<shared_ptr<DNSRecordContent>> luaSynth(const std::string& code, cons
 
   LuaContext& lua = *s_LUA->getLua();
 
-  s_lua_record_ctx = std::unique_ptr<lua_record_ctx_t>(new lua_record_ctx_t());
+  s_lua_record_ctx = std::make_unique<lua_record_ctx_t>();
   s_lua_record_ctx->qname = query;
   s_lua_record_ctx->zone = zone;
   s_lua_record_ctx->zoneid = zoneid;
@@ -978,7 +1023,7 @@ std::vector<shared_ptr<DNSRecordContent>> luaSynth(const std::string& code, cons
   lua.writeVariable("qname", query);
   lua.writeVariable("zone", zone);
   lua.writeVariable("zoneid", zoneid);
-  lua.writeVariable("who", dnsp.getRemote());
+  lua.writeVariable("who", dnsp.getInnerRemote());
   lua.writeVariable("dh", (dnsheader*)&dnsp.d);
   lua.writeVariable("dnssecOK", dnsp.d_dnssecOk);
   lua.writeVariable("tcp", dnsp.d_tcp);
@@ -989,7 +1034,7 @@ std::vector<shared_ptr<DNSRecordContent>> luaSynth(const std::string& code, cons
   }
   else {
     lua.writeVariable("ecswho", nullptr);
-    s_lua_record_ctx->bestwho = dnsp.getRemote();
+    s_lua_record_ctx->bestwho = dnsp.getInnerRemote();
   }
   lua.writeVariable("bestwho", s_lua_record_ctx->bestwho);
 

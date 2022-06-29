@@ -181,6 +181,10 @@ cname-to-formerr.secure.example. 3600 IN CNAME host1.insecure-formerr.example.
 dname-secure.secure.example. 3600 IN DNAME dname-secure.example.
 dname-insecure.secure.example. 3600 IN DNAME insecure.example.
 dname-bogus.secure.example. 3600 IN DNAME bogus.example.
+
+non-apex-dnskey.secure.example. 3600 IN DNSKEY 257 3 13 CT6AJ4MEOtNDgj0+xLtTLGHf1WbLsKWZI8ONHOt/6q7hTjeWSnY/SGig1dIKZrHg+pJFUSPaxeShv48SYVRKEg==
+non-apex-dnskey2.secure.example. 3600 IN DNSKEY 256 3 13 CT6AJ4MEOtNDgj0+xLtTLGHf1WbLsKWZI8ONHOt/6q7hTjeWSnY/SGig1dIKZrHg+pJFUSPaxeShv48SYVRKEg==
+non-apex-dnskey3.secure.example. 3600 IN DNSKEY 256 3 13 DT6AJ4MEOtNDgj0+xLtTLGHf1WbLsKWZI8ONHOt/6q7hTjeWSnY/SGig1dIKZrHg+pJFUSPaxeShv48SYVRKEg==
         """,
         'dname-secure.example': """
 dname-secure.example. 3600 IN SOA {soa}
@@ -518,15 +522,29 @@ distributor-threads={threads}""".format(confdir=confdir,
                 cls.startAuth(authconfdir, ipaddress)
 
     @classmethod
+    def waitForTCPSocket(cls, ipaddress, port):
+        for try_number in range(0, 100):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1.0)
+                sock.connect((ipaddress, port))
+                sock.close()
+                return
+            except Exception as err:
+                if err.errno != errno.ECONNREFUSED:
+                    print(f'Error occurred: {try_number} {err}', file=sys.stderr)
+            time.sleep(0.1)
+
+    @classmethod
     def startAuth(cls, confdir, ipaddress):
         print("Launching pdns_server..")
         authcmd = list(cls._auth_cmd)
         authcmd.append('--config-dir=%s' % confdir)
-        authcmd.append('--local-address=%s' % ipaddress)
-        if (confdir[-4:] == "ROOT") and have_ipv6():
-            authcmd.append('--local-ipv6=::1')
-        else:
-            authcmd.append('--local-ipv6=')
+        ipconfig = ipaddress
+        # auth-8 is the auth serving the root, it gets an ipv6 address
+        if (confdir[-6:] == "auth-8") and have_ipv6():
+            ipconfig += ',::1'
+        authcmd.append('--local-address=%s' % ipconfig)
         print(' '.join(authcmd))
 
         logFile = os.path.join(confdir, 'pdns.log')
@@ -535,17 +553,14 @@ distributor-threads={threads}""".format(confdir=confdir,
                                                      stdout=fdLog, stderr=fdLog,
                                                      env=cls._auth_env)
 
-        time.sleep(2)
+        cls.waitForTCPSocket(ipaddress, 53)
 
         if cls._auths[ipaddress].poll() is not None:
-            try:
-                cls._auths[ipaddress].kill()
-            except OSError as e:
-                if e.errno != errno.ESRCH:
-                    raise
-                with open(logFile, 'r') as fdLog:
-                    print(fdLog.read())
-            sys.exit(cls._auths[ipaddress].returncode)
+            print(f"\n*** startAuth log for {logFile} ***")
+            with open(logFile, 'r') as fdLog:
+                print(fdLog.read())
+            print(f"*** End startAuth log for {logFile} ***")
+            raise AssertionError('%s failed (%d)' % (authcmd, cls._auths[ipaddress].returncode))
 
     @classmethod
     def generateRecursorConfig(cls, confdir):
@@ -598,22 +613,14 @@ distributor-threads={threads}""".format(confdir=confdir,
             cls._recursor = subprocess.Popen(recursorcmd, close_fds=True,
                                              stdout=fdLog, stderr=fdLog)
 
-        if 'PDNSRECURSOR_FAST_TESTS' in os.environ:
-            delay = 0.5
-        else:
-            delay = cls._recursorStartupDelay
-
-        time.sleep(delay)
+        cls.waitForTCPSocket("127.0.0.1", port)
 
         if cls._recursor.poll() is not None:
-            try:
-                cls._recursor.kill()
-            except OSError as e:
-                if e.errno != errno.ESRCH:
-                    raise
-                with open(logFile, 'r') as fdLog:
-                    print(fdLog.read())
-            sys.exit(cls._recursor.returncode)
+            print(f"\n*** startRecursor log for {logFile} ***")
+            with open(logFile, 'r') as fdLog:
+                print(fdLog.read())
+            print(f"*** End startRecursor log for {logFile} ***")
+            raise AssertionError('%s failed (%d)' % (recursorcmd, _recursor.returncode))
 
     @classmethod
     def wipeRecursorCache(cls, confdir):
@@ -660,44 +667,36 @@ distributor-threads={threads}""".format(confdir=confdir,
         pass
 
     @classmethod
-    def tearDownAuth(cls):
-        if 'PDNSRECURSOR_FAST_TESTS' in os.environ:
-            delay = 0.1
-        else:
-            delay = 1.0
-
-        for _, auth in cls._auths.items():
-            try:
-                auth.terminate()
-                if auth.poll() is None:
-                    time.sleep(delay)
-                    if auth.poll() is None:
-                        auth.kill()
-                    auth.wait()
-            except OSError as e:
-                if e.errno != errno.ESRCH:
-                    raise
-
-    @classmethod
-    def tearDownRecursor(cls):
-        if 'PDNSRECURSOR_FAST_TESTS' in os.environ:
-            delay = 0.1
-        else:
-            delay = 1.0
+    def killProcess(cls, p):
+        # Don't try to kill it if it's already dead
+        if p.poll() is not None:
+            return
         try:
-            if cls._recursor:
-                cls._recursor.terminate()
-                if cls._recursor.poll() is None:
-                    time.sleep(delay)
-                    if cls._recursor.poll() is None:
-                        cls._recursor.kill()
-                    cls._recursor.wait()
+            p.terminate()
+            for count in range(10):
+                x = p.poll()
+                if x is not None:
+                    break
+                time.sleep(0.1)
+            if x is None:
+                print("kill...", p, file=sys.stderr)
+                p.kill()
+                p.wait()
         except OSError as e:
             # There is a race-condition with the poll() and
             # kill() statements, when the process is dead on the
             # kill(), this is fine
             if e.errno != errno.ESRCH:
                 raise
+
+    @classmethod
+    def tearDownAuth(cls):
+        for _, auth in cls._auths.items():
+            cls.killProcess(auth);
+
+    @classmethod
+    def tearDownRecursor(cls):
+        cls.killProcess(cls._recursor)
 
     @classmethod
     def sendUDPQuery(cls, query, timeout=2.0, decode=True, fwparams=dict()):

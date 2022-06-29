@@ -20,10 +20,15 @@ AC_DEFUN([PDNS_CHECK_OS],[
     ;;
   darwin*)
     CXXFLAGS="-D__APPLE_USE_RFC_3542 -D_XOPEN_SOURCE -D_DARWIN_C_SOURCE $CXXFLAGS"
+    have_darwin="yes"
     ;;
   freebsd*)
     THREADFLAGS="-pthread"
     have_freebsd="yes"
+    ;;
+  openbsd*)
+    THREADFLAGS="-pthread"
+    have_openbsd="yes"
     ;;
   *)
     LDFLAGS="-pthread $LDFLAGS"
@@ -32,7 +37,9 @@ AC_DEFUN([PDNS_CHECK_OS],[
   esac
 
   AM_CONDITIONAL([HAVE_FREEBSD], [test "x$have_freebsd" = "xyes"])
+  AM_CONDITIONAL([HAVE_OPENBSD], [test "x$have_openbsd" = "xyes"])
   AM_CONDITIONAL([HAVE_LINUX], [test "x$have_linux" = "xyes"])
+  AM_CONDITIONAL([HAVE_DARWIN], [test "x$have_darwin" = "xyes"])
   AM_CONDITIONAL([HAVE_SOLARIS], [test "x$have_solaris" = "xyes"])
 
   AC_MSG_CHECKING([whether -latomic is needed for __atomic builtins])

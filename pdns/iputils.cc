@@ -55,20 +55,20 @@ int SConnect(int sockfd, const ComboAddress& remote)
   return ret;
 }
 
-int SConnectWithTimeout(int sockfd, const ComboAddress& remote, int timeout)
+int SConnectWithTimeout(int sockfd, const ComboAddress& remote, const struct timeval& timeout)
 {
   int ret = connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen());
   if(ret < 0) {
     int savederrno = errno;
     if (savederrno == EINPROGRESS) {
-      if (timeout <= 0) {
+      if (timeout <= timeval{0,0}) {
         return savederrno;
       }
 
       /* we wait until the connection has been established */
       bool error = false;
       bool disconnected = false;
-      int res = waitForRWData(sockfd, false, timeout, 0, &error, &disconnected);
+      int res = waitForRWData(sockfd, false, timeout.tv_sec, timeout.tv_usec, &error, &disconnected);
       if (res == 1) {
         if (error) {
           savederrno = 0;
@@ -437,7 +437,7 @@ size_t sendMsgWithOptions(int fd, const char* buffer, size_t len, const ComboAdd
   return 0;
 }
 
-template class NetmaskTree<bool>;
+template class NetmaskTree<bool, Netmask>;
 
 /* requires a non-blocking socket.
    On Linux, we could use MSG_DONTWAIT on a blocking socket
@@ -518,4 +518,28 @@ ComboAddress parseIPAndPort(const std::string& input, uint16_t port)
   default: // case 4
     return ComboAddress(input, port);
   }
+}
+
+void setSocketBuffer(int fd, int optname, uint32_t size)
+{
+  uint32_t psize = 0;
+  socklen_t len = sizeof(psize);
+
+  if (!getsockopt(fd, SOL_SOCKET, optname, &psize, &len) && psize > size) {
+    throw std::runtime_error("Not decreasing socket buffer size from " + std::to_string(psize) + " to " + std::to_string(size));
+  }
+
+  if (setsockopt(fd, SOL_SOCKET, optname, &size, sizeof(size)) < 0) {
+    throw std::runtime_error("Unable to raise socket buffer size to " + std::to_string(size) + ": " + stringerror());
+  }
+}
+
+void setSocketReceiveBuffer(int fd, uint32_t size)
+{
+  setSocketBuffer(fd, SO_RCVBUF, size);
+}
+
+void setSocketSendBuffer(int fd, uint32_t size)
+{
+  setSocketBuffer(fd, SO_SNDBUF, size);
 }

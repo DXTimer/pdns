@@ -11,6 +11,7 @@ ExecStartPre=@bindir@/dnsdist --check-config
 ExecStart=@bindir@/dnsdist --supervised --disable-syslog
 User=@service_user@
 Group=@service_group@
+SyslogIdentifier=dnsdist
 Type=notify
 Restart=on-failure
 RestartSec=2
@@ -18,10 +19,14 @@ TimeoutStopSec=5
 StartLimitInterval=0
 
 # Tuning
-LimitNOFILE=16384
 TasksMax=8192
+LimitNOFILE=16384
+# Note: increasing the amount of lockable memory is required to use eBPF support
+# LimitMEMLOCK=infinity
 
 # Sandboxing
+# Note: adding CAP_SYS_ADMIN (or CAP_BPF for Linux >= 5.8) is required to use eBPF support,
+# and CAP_NET_RAW to be able to set the source interface to contact a backend
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 LockPersonality=true

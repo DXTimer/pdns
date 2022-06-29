@@ -1,3 +1,5 @@
+# See https://github.com/check-spelling/check-spelling/wiki/Configuration-Examples:-patterns
+
 # GitHub SHAs
 \bapi.github\.com/repos/[^/]+/[^/]+/[^/]+/[0-9a-f]+\b
 (?:\[[0-9a-f]+\]\(https:/|)/github\.com/[^/]+/[^/]+/[^/]+/[0-9a-f]+(?:[-0-9a-zA-Z/#.]*|)\b
@@ -13,7 +15,7 @@ msdn\.microsoft\.com/(?:[^/]+/|)library/\S*\.aspx?
 # uuid:
 \b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b
 # hex digits including css/html color classes:
-(?:[\\0][xX]|\\u|[uU]\+|#x?|\%23)[0-9a-fA-FgGrR_]{2,}(?:[uU]?[lL]{0,2}|u\d+)\b
+(?:[\\0][xX]|\\u?|[uU]\+|#x?|\%23)[0-9a-fA-FgGrR_]{2,}(?:[uU]?[lL]{0,2}|u\d+)\b
 
 # hex things
 \b[0-9a-f]{8,}\b
@@ -23,7 +25,10 @@ msdn\.microsoft\.com/(?:[^/]+/|)library/\S*\.aspx?
 addNSECRecordToLW.*DNSName.*powerdnt.com.*QType::NS.*res->d_records
 data:[a-zA-Z=;,/0-9+]+
 BOOST_CHECK_EQUAL\(b64, "[a-zA-Z=;,/0-9+]+"
-\b([A-Za-z])\1{3,}\b
+
+# ignore long runs of a single character:
+\b([A-Za-z])\g{-1}{3,}\b
+
 C(?:XX|)FLAGS="[^"]*"
 
 nsec3param\s*=\s*'[^']*'
@@ -51,3 +56,11 @@ C0FFEE
 [Vv]\d+(?:\b|(?=[a-zA-Z_]))
 # tar arguments
 \b(?:)tar(?:\s+-[a-zA-Z]+|\s[a-z]+)+
+
+# DoT: DNS over TLS is often combined with other words (images, links, ...), same for DoH
+DoT
+DoH
+
+# Contributors with non-ascii characters in their name
+Hoffst[^[:ascii:]]+tte
+Gri[^[:ascii:]]

@@ -122,7 +122,7 @@ uint8_t dnsdist_ffi_dnsquestion_get_opcode(const dnsdist_ffi_dnsquestion_t* dq)
 
 bool dnsdist_ffi_dnsquestion_get_tcp(const dnsdist_ffi_dnsquestion_t* dq)
 {
-  return dq->dq->tcp;
+  return dq->dq->overTCP();
 }
 
 bool dnsdist_ffi_dnsquestion_get_skip_cache(const dnsdist_ffi_dnsquestion_t* dq)
@@ -409,11 +409,7 @@ void dnsdist_ffi_dnsquestion_unset_temp_failure_ttl(dnsdist_ffi_dnsquestion_t* d
 
 void dnsdist_ffi_dnsquestion_set_tag(dnsdist_ffi_dnsquestion_t* dq, const char* label, const char* value)
 {
-  if (!dq->dq->qTag) {
-    dq->dq->qTag = std::make_shared<QTag>();
-  }
-
-  dq->dq->qTag->insert({label, value});
+  dq->dq->setTag(label, value);
 }
 
 size_t dnsdist_ffi_dnsquestion_get_trailing_data(dnsdist_ffi_dnsquestion_t* dq, const char** out)
@@ -436,6 +432,49 @@ void dnsdist_ffi_dnsquestion_send_trap(dnsdist_ffi_dnsquestion_t* dq, const char
   if (g_snmpAgent && g_snmpTrapsEnabled) {
     g_snmpAgent->sendDNSTrap(*dq->dq, std::string(reason, reasonLen));
   }
+}
+
+void dnsdist_ffi_dnsquestion_spoof_raw(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
+{
+  std::vector<std::string> data;
+  data.reserve(valuesCount);
+
+  for (size_t idx = 0; idx < valuesCount; idx++) {
+    data.emplace_back(values[idx].value, values[idx].size);
+  }
+
+  std::string result;
+  SpoofAction sa(data);
+  sa(dq->dq, &result);
+}
+
+void dnsdist_ffi_dnsquestion_spoof_addrs(dnsdist_ffi_dnsquestion_t* dq, const dnsdist_ffi_raw_value_t* values, size_t valuesCount)
+{
+  std::vector<ComboAddress> data;
+  data.reserve(valuesCount);
+
+  for (size_t idx = 0; idx < valuesCount; idx++) {
+    if (values[idx].size == 4) {
+      sockaddr_in sin;
+      sin.sin_family = AF_INET;
+      sin.sin_port = 0;
+      memcpy(&sin.sin_addr.s_addr, values[idx].value, sizeof(sin.sin_addr.s_addr));
+      data.emplace_back(&sin);
+    }
+    else if (values[idx].size == 16) {
+      sockaddr_in6 sin6;
+      sin6.sin6_family = AF_INET6;
+      sin6.sin6_port = 0;
+      sin6.sin6_scope_id = 0;
+      sin6.sin6_flowinfo = 0;
+      memcpy(&sin6.sin6_addr.s6_addr, values[idx].value, sizeof(sin6.sin6_addr.s6_addr));
+      data.emplace_back(&sin6);
+    }
+  }
+
+  std::string result;
+  SpoofAction sa(data);
+  sa(dq->dq, &result);
 }
 
 size_t dnsdist_ffi_servers_list_get_count(const dnsdist_ffi_servers_list_t* list)
@@ -527,6 +566,15 @@ void setupLuaLoadBalancingContext(LuaContext& luaCtx)
   setupLuaBindings(luaCtx, true);
   setupLuaBindingsDNSQuestion(luaCtx);
   setupLuaBindingsKVS(luaCtx, true);
+  setupLuaVars(luaCtx);
+
+#ifdef LUAJIT_VERSION
+  luaCtx.executeCode(getLuaFFIWrappers());
+#endif
+}
+
+void setupLuaFFIPerThreadContext(LuaContext& luaCtx)
+{
   setupLuaVars(luaCtx);
 
 #ifdef LUAJIT_VERSION

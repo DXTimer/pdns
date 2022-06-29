@@ -5,7 +5,6 @@ TinyDNS Backend
 - Master: Yes
 - Slave: No
 - Superslave: No
-- Autoserial: No
 - DNSSEC: No
 - Zone caching: Yes
 - Multiple Instances: Yes
@@ -147,7 +146,7 @@ PowerDNS and TinyDNS handle wildcards differently. Looking up
 foo.www.example.com with the below records on TinyDNS will return
 198.51.100.1, PowerDNS will return NXDOMAIN. According to :rfc:`4592` \*.example.com should only
 match subdomains in under example.com, not \*.\*.example.com. This
-compatibility issue is `noted on the axfer-get page for the djbdns
+compatibility issue is `noted on the axfr-get page for the djbdns
 suite <https://cr.yp.to/djbdns/axfr-get.html>`__.
 
 ::

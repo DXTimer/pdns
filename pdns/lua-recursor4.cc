@@ -60,33 +60,33 @@ bool RecursorLua4::DNSQuestion::getEDNSFlag(string flag) const
   return false;
 }
 
-vector<pair<uint16_t, string> > RecursorLua4::DNSQuestion::getEDNSOptions() const
+vector<pair<uint16_t, string>> RecursorLua4::DNSQuestion::getEDNSOptions() const
 {
-  if(ednsOptions)
+  if (ednsOptions)
     return *ednsOptions;
   else
-    return vector<pair<uint16_t,string>>();
+    return vector<pair<uint16_t, string>>();
 }
 
-boost::optional<string>  RecursorLua4::DNSQuestion::getEDNSOption(uint16_t code) const
+boost::optional<string> RecursorLua4::DNSQuestion::getEDNSOption(uint16_t code) const
 {
-  if(ednsOptions)
-    for(const auto& o : *ednsOptions)
-      if(o.first==code)
+  if (ednsOptions)
+    for (const auto& o : *ednsOptions)
+      if (o.first == code)
         return o.second;
-        
+
   return boost::optional<string>();
 }
 
-boost::optional<Netmask>  RecursorLua4::DNSQuestion::getEDNSSubnet() const
+boost::optional<Netmask> RecursorLua4::DNSQuestion::getEDNSSubnet() const
 {
-  if(ednsOptions) {
-    for(const auto& o : *ednsOptions) {
-      if(o.first==EDNSOptionCode::ECS) {
+  if (ednsOptions) {
+    for (const auto& o : *ednsOptions) {
+      if (o.first == EDNSOptionCode::ECS) {
         EDNSSubnetOpts eso;
-        if(getEDNSSubnetOptsFromString(o.second, &eso))
+        if (getEDNSSubnetOptsFromString(o.second, &eso))
           return eso.source;
-        else 
+        else
           break;
       }
     }
@@ -101,27 +101,27 @@ std::vector<std::pair<int, ProxyProtocolValue>> RecursorLua4::DNSQuestion::getPr
     result.reserve(proxyProtocolValues->size());
 
     int idx = 1;
-    for (const auto& value: *proxyProtocolValues) {
-      result.push_back({ idx++, value });
+    for (const auto& value : *proxyProtocolValues) {
+      result.push_back({idx++, value});
     }
   }
 
   return result;
 }
 
-vector<pair<int, DNSRecord> > RecursorLua4::DNSQuestion::getRecords() const
+vector<pair<int, DNSRecord>> RecursorLua4::DNSQuestion::getRecords() const
 {
-  vector<pair<int, DNSRecord> > ret;
-  int num=1;
-  for(const auto& r : records) {
+  vector<pair<int, DNSRecord>> ret;
+  int num = 1;
+  for (const auto& r : records) {
     ret.push_back({num++, r});
   }
   return ret;
 }
-void RecursorLua4::DNSQuestion::setRecords(const vector<pair<int, DNSRecord> >& recs)
+void RecursorLua4::DNSQuestion::setRecords(const vector<pair<int, DNSRecord>>& recs)
 {
   records.clear();
-  for(const auto& p : recs) {
+  for (const auto& p : recs) {
     records.push_back(p.second);
   }
 }
@@ -129,8 +129,8 @@ void RecursorLua4::DNSQuestion::setRecords(const vector<pair<int, DNSRecord> >& 
 void RecursorLua4::DNSQuestion::addRecord(uint16_t type, const std::string& content, DNSResourceRecord::Place place, boost::optional<int> ttl, boost::optional<string> name)
 {
   DNSRecord dr;
-  dr.d_name=name ? DNSName(*name) : qname;
-  dr.d_ttl=ttl.get_value_or(3600);
+  dr.d_name = name ? DNSName(*name) : qname;
+  dr.d_ttl = ttl.get_value_or(3600);
   dr.d_type = type;
   dr.d_place = place;
   dr.d_content = DNSRecordContent::mastermake(type, QClass::IN, content);
@@ -146,10 +146,12 @@ struct DynMetric
 {
   std::atomic<unsigned long>* ptr;
   void inc() { (*ptr)++; }
-  void incBy(unsigned int by) { (*ptr)+= by; }
+  void incBy(unsigned int by) { (*ptr) += by; }
   unsigned long get() { return *ptr; }
-  void set(unsigned long val) { *ptr =val; }
+  void set(unsigned long val) { *ptr = val; }
 };
+
+// clang-format off
 
 void RecursorLua4::postPrepareContext()
 {
@@ -465,7 +467,10 @@ void RecursorLua4::postPrepareContext()
   });
 }
 
-void RecursorLua4::postLoad() {
+// clang-format on
+
+void RecursorLua4::postLoad()
+{
   d_prerpz = d_lw->readVariable<boost::optional<luacall_t>>("prerpz").get_value_or(0);
   d_preresolve = d_lw->readVariable<boost::optional<luacall_t>>("preresolve").get_value_or(0);
   d_nodata = d_lw->readVariable<boost::optional<luacall_t>>("nodata").get_value_or(0);
@@ -481,12 +486,13 @@ void RecursorLua4::postLoad() {
   d_policyHitEventFilter = d_lw->readVariable<boost::optional<policyEventFilter_t>>("policyEventFilter").get_value_or(0);
 }
 
-void RecursorLua4::getFeatures(Features & features) {
+void RecursorLua4::getFeatures(Features& features)
+{
   // Add key-values pairs below.
   // Make sure you add string values explicitly converted to string.
-  // e.g. features.push_back(make_pair("somekey", string("stringvalue"));
+  // e.g. features.emplace_back("somekey", string("stringvalue");
   // Both int and double end up as a lua number type.
-   features.push_back(make_pair("PR8001_devicename", true));
+  features.emplace_back("PR8001_devicename", true);
 }
 
 void RecursorLua4::maintenance() const
@@ -496,48 +502,87 @@ void RecursorLua4::maintenance() const
   }
 }
 
-bool RecursorLua4::prerpz(DNSQuestion& dq, int& ret) const
+bool RecursorLua4::prerpz(DNSQuestion& dq, int& ret, RecEventTrace& et) const
 {
-  return genhook(d_prerpz, dq, ret);
+  if (!d_prerpz) {
+    return false;
+  }
+  et.add(RecEventTrace::LuaPreRPZ);
+  bool ok = genhook(d_prerpz, dq, ret);
+  et.add(RecEventTrace::LuaPreRPZ, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::preresolve(DNSQuestion& dq, int& ret) const
+bool RecursorLua4::preresolve(DNSQuestion& dq, int& ret, RecEventTrace& et) const
 {
-  return genhook(d_preresolve, dq, ret);
+  if (!d_preresolve) {
+    return false;
+  }
+  et.add(RecEventTrace::LuaPreResolve);
+  bool ok = genhook(d_preresolve, dq, ret);
+  et.add(RecEventTrace::LuaPreResolve, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::nxdomain(DNSQuestion& dq, int& ret) const
+bool RecursorLua4::nxdomain(DNSQuestion& dq, int& ret, RecEventTrace& et) const
 {
-  return genhook(d_nxdomain, dq, ret);
+  if (!d_nxdomain) {
+    return false;
+  }
+  et.add(RecEventTrace::LuaNXDomain);
+  bool ok = genhook(d_nxdomain, dq, ret);
+  et.add(RecEventTrace::LuaNXDomain, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::nodata(DNSQuestion& dq, int& ret) const
+bool RecursorLua4::nodata(DNSQuestion& dq, int& ret, RecEventTrace& et) const
 {
-  return genhook(d_nodata, dq, ret);
+  if (!d_nodata) {
+    return false;
+  }
+  et.add(RecEventTrace::LuaNoData);
+  bool ok = genhook(d_nodata, dq, ret);
+  et.add(RecEventTrace::LuaNoData, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::postresolve(DNSQuestion& dq, int& ret) const
+bool RecursorLua4::postresolve(DNSQuestion& dq, int& ret, RecEventTrace& et) const
 {
-  return genhook(d_postresolve, dq, ret);
+  if (!d_postresolve) {
+    return false;
+  }
+  et.add(RecEventTrace::LuaPostResolve);
+  bool ok = genhook(d_postresolve, dq, ret);
+  et.add(RecEventTrace::LuaPostResolve, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::preoutquery(const ComboAddress& ns, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool isTcp, vector<DNSRecord>& res, int& ret) const
+bool RecursorLua4::preoutquery(const ComboAddress& ns, const ComboAddress& requestor, const DNSName& query, const QType& qtype, bool isTcp, vector<DNSRecord>& res, int& ret, RecEventTrace& et) const
 {
+  if (!d_preoutquery) {
+    return false;
+  }
   bool variableAnswer = false;
   bool wantsRPZ = false;
   bool logQuery = false;
   bool addPaddingToResponse = false;
   RecursorLua4::DNSQuestion dq(ns, requestor, query, qtype.getCode(), isTcp, variableAnswer, wantsRPZ, logQuery, addPaddingToResponse);
   dq.currentRecords = &res;
-
-  return genhook(d_preoutquery, dq, ret);
+  et.add(RecEventTrace::LuaPreOutQuery);
+  bool ok = genhook(d_preoutquery, dq, ret);
+  et.add(RecEventTrace::LuaPreOutQuery, ok, false);
+  return ok;
 }
 
-bool RecursorLua4::ipfilter(const ComboAddress& remote, const ComboAddress& local, const struct dnsheader& dh) const
+bool RecursorLua4::ipfilter(const ComboAddress& remote, const ComboAddress& local, const struct dnsheader& dh, RecEventTrace& et) const
 {
-  if(d_ipfilter)
-    return d_ipfilter(remote, local, dh);
-  return false; // don't block
+  if (!d_ipfilter) {
+    return false; // Do not block
+  }
+  et.add(RecEventTrace::LuaIPFilter);
+  bool ok = d_ipfilter(remote, local, dh);
+  et.add(RecEventTrace::LuaIPFilter, ok, false);
+  return ok;
 }
 
 bool RecursorLua4::policyHitEventFilter(const ComboAddress& remote, const DNSName& qname, const QType& qtype, bool tcp, DNSFilterEngine::Policy& policy, std::unordered_set<std::string>& tags, std::unordered_map<std::string, bool>& discardedPolicies) const
@@ -561,7 +606,7 @@ bool RecursorLua4::policyHitEventFilter(const ComboAddress& remote, const DNSNam
 
 unsigned int RecursorLua4::gettag(const ComboAddress& remote, const Netmask& ednssubnet, const ComboAddress& local, const DNSName& qname, uint16_t qtype, std::unordered_set<std::string>* policyTags, LuaContext::LuaObject& data, const EDNSOptionViewMap& ednsOptions, bool tcp, std::string& requestorId, std::string& deviceId, std::string& deviceName, std::string& routingTag, const std::vector<ProxyProtocolValue>& proxyProtocolValues) const
 {
-  if(d_gettag) {
+  if (d_gettag) {
     std::vector<std::pair<int, const ProxyProtocolValue*>> proxyProtocolValuesMap;
     proxyProtocolValuesMap.reserve(proxyProtocolValues.size());
     int num = 1;
@@ -611,7 +656,8 @@ unsigned int RecursorLua4::gettag(const ComboAddress& remote, const Netmask& edn
 struct pdns_ffi_param
 {
 public:
-  pdns_ffi_param(RecursorLua4::FFIParams& params_): params(params_)
+  pdns_ffi_param(RecursorLua4::FFIParams& params_) :
+    params(params_)
   {
   }
 
@@ -641,12 +687,13 @@ unsigned int RecursorLua4::gettag_ffi(RecursorLua4::FFIParams& params) const
 
 bool RecursorLua4::genhook(const luacall_t& func, DNSQuestion& dq, int& ret) const
 {
-  if(!func)
+  if (!func)
     return false;
 
   if (dq.currentRecords) {
     dq.records = *dq.currentRecords;
-  } else {
+  }
+  else {
     dq.records.clear();
   }
 
@@ -658,32 +705,32 @@ bool RecursorLua4::genhook(const luacall_t& func, DNSQuestion& dq, int& ret) con
   dq.udpCallback.clear();
 
   dq.rcode = ret;
-  bool handled=func(&dq);
+  bool handled = func(&dq);
 
-  if(handled) {
-loop:;
-    ret=dq.rcode;
-    
-    if(!dq.followupFunction.empty()) {
-      if(dq.followupFunction=="followCNAMERecords") {
+  if (handled) {
+  loop:;
+    ret = dq.rcode;
+
+    if (!dq.followupFunction.empty()) {
+      if (dq.followupFunction == "followCNAMERecords") {
         ret = followCNAMERecords(dq.records, QType(dq.qtype), ret);
       }
-      else if(dq.followupFunction=="getFakeAAAARecords") {
-        ret=getFakeAAAARecords(dq.followupName, ComboAddress(dq.followupPrefix), dq.records);
+      else if (dq.followupFunction == "getFakeAAAARecords") {
+        ret = getFakeAAAARecords(dq.followupName, ComboAddress(dq.followupPrefix), dq.records);
       }
-      else if(dq.followupFunction=="getFakePTRRecords") {
-        ret=getFakePTRRecords(dq.followupName, dq.records);
+      else if (dq.followupFunction == "getFakePTRRecords") {
+        ret = getFakePTRRecords(dq.followupName, dq.records);
       }
-      else if(dq.followupFunction=="udpQueryResponse") {
+      else if (dq.followupFunction == "udpQueryResponse") {
         PacketBuffer p = GenUDPQueryResponse(dq.udpQueryDest, dq.udpQuery);
         dq.udpAnswer = std::string(reinterpret_cast<const char*>(p.data()), p.size());
         auto cbFunc = d_lw->readVariable<boost::optional<luacall_t>>(dq.udpCallback).get_value_or(0);
-        if(!cbFunc) {
-          g_log<<Logger::Error<<"Attempted callback for Lua UDP Query/Response which could not be found"<<endl;
+        if (!cbFunc) {
+          g_log << Logger::Error << "Attempted callback for Lua UDP Query/Response which could not be found" << endl;
           return false;
         }
-        bool result=cbFunc(&dq);
-        if(!result) {
+        bool result = cbFunc(&dq);
+        if (!result) {
           return false;
         }
         goto loop;
@@ -698,12 +745,12 @@ loop:;
   return handled;
 }
 
-RecursorLua4::~RecursorLua4(){}
+RecursorLua4::~RecursorLua4() {}
 
 const char* pdns_ffi_param_get_qname(pdns_ffi_param_t* ref)
 {
   if (!ref->qnameStr) {
-    ref->qnameStr = std::unique_ptr<std::string>(new std::string(ref->params.qname.toStringNoDot()));
+    ref->qnameStr = std::make_unique<std::string>(ref->params.qname.toStringNoDot());
   }
 
   return ref->qnameStr->c_str();
@@ -724,7 +771,7 @@ uint16_t pdns_ffi_param_get_qtype(const pdns_ffi_param_t* ref)
 const char* pdns_ffi_param_get_remote(pdns_ffi_param_t* ref)
 {
   if (!ref->remoteStr) {
-    ref->remoteStr = std::unique_ptr<std::string>(new std::string(ref->params.remote.toString()));
+    ref->remoteStr = std::make_unique<std::string>(ref->params.remote.toString());
   }
 
   return ref->remoteStr->c_str();
@@ -755,7 +802,7 @@ uint16_t pdns_ffi_param_get_remote_port(const pdns_ffi_param_t* ref)
 const char* pdns_ffi_param_get_local(pdns_ffi_param_t* ref)
 {
   if (!ref->localStr) {
-    ref->localStr = std::unique_ptr<std::string>(new std::string(ref->params.local.toString()));
+    ref->localStr = std::make_unique<std::string>(ref->params.local.toString());
   }
 
   return ref->localStr->c_str();
@@ -778,7 +825,7 @@ const char* pdns_ffi_param_get_edns_cs(pdns_ffi_param_t* ref)
   }
 
   if (!ref->ednssubnetStr) {
-    ref->ednssubnetStr = std::unique_ptr<std::string>(new std::string(ref->params.ednssubnet.toStringNoMask()));
+    ref->ednssubnetStr = std::make_unique<std::string>(ref->params.ednssubnet.toStringNoMask());
   }
 
   return ref->ednssubnetStr->c_str();
@@ -887,7 +934,7 @@ void pdns_ffi_param_set_tag(pdns_ffi_param_t* ref, unsigned int tag)
   ref->params.tag = tag;
 }
 
-void pdns_ffi_param_add_policytag(pdns_ffi_param_t *ref, const char* name)
+void pdns_ffi_param_add_policytag(pdns_ffi_param_t* ref, const char* name)
 {
   ref->params.policyTags.insert(std::string(name));
 }
@@ -952,7 +999,7 @@ void pdns_ffi_param_set_extended_error_extra(pdns_ffi_param_t* ref, size_t len, 
   ref->params.extendedErrorExtra = std::string(extra, len);
 }
 
-bool pdns_ffi_param_add_record(pdns_ffi_param_t *ref, const char* name, uint16_t type, uint32_t ttl, const char* content, size_t contentSize, pdns_record_place_t place)
+bool pdns_ffi_param_add_record(pdns_ffi_param_t* ref, const char* name, uint16_t type, uint32_t ttl, const char* content, size_t contentSize, pdns_record_place_t place)
 {
   try {
     DNSRecord dr;
@@ -967,7 +1014,7 @@ bool pdns_ffi_param_add_record(pdns_ffi_param_t *ref, const char* name, uint16_t
     return true;
   }
   catch (const std::exception& e) {
-    g_log<<Logger::Error<<"Error attempting to add a record from Lua via pdns_ffi_param_add_record(): "<<e.what()<<endl;
+    g_log << Logger::Error << "Error attempting to add a record from Lua via pdns_ffi_param_add_record(): " << e.what() << endl;
     return false;
   }
 }
@@ -975,4 +1022,14 @@ bool pdns_ffi_param_add_record(pdns_ffi_param_t *ref, const char* name, uint16_t
 void pdns_ffi_param_set_padding_disabled(pdns_ffi_param_t* ref, bool disabled)
 {
   ref->params.disablePadding = disabled;
+}
+
+void pdns_ffi_param_add_meta_single_string_kv(pdns_ffi_param_t* ref, const char* key, const char* val)
+{
+  ref->params.meta[std::string(key)].stringVal.insert(std::string(val));
+}
+
+void pdns_ffi_param_add_meta_single_int64_kv(pdns_ffi_param_t* ref, const char* key, int64_t val)
+{
+  ref->params.meta[std::string(key)].intVal.insert(val);
 }

@@ -103,7 +103,7 @@ set-nsec3 *ZONE* ['*HASH-ALGORITHM* *FLAGS* *ITERATIONS* *SALT*'] [**narrow**]
     it will send out the hash + 1 as the next secure record. Narrow mode
     requires online signing capabilities by the nameserver and therefore
     zone transfers are denied. If only the zone is provided as argument,
-    the 4-parameter quoted string defaults to ``'1 0 1 ab'``. A sample
+    the 4-parameter quoted string defaults to ``'1 0 0 -'``. A sample
     commandline is: ``pdnsutil set-nsec3 powerdnssec.org '1 1 1 ab' narrow``.
     **WARNING**: If running in RSASHA1 mode (algorithm 5 or 7), switching
     from NSEC to NSEC3 will require a DS update in the parent zone.
@@ -164,6 +164,10 @@ add-record *ZONE* *NAME* *TYPE* [*TTL*] *CONTENT*
     and optional *TTL*. If *TTL* is not set, default will be used. 
 add-autoprimary *IP* *NAMESERVER* [*ACCOUNT*]
     Add a autoprimary entry into the backend. This enables receiving zone updates from other servers.
+remove-autoprimary *IP* *NAMESERVER*
+    Remove an autoprimary from backend. Not supported by BIND backend.
+list-autoprimaries
+    List all autoprimaries.
 create-zone *ZONE*
     Create an empty zone named *ZONE*.
 create-secondary-zone *ZONE* *PRIMARY* [*PRIMARY*]..
@@ -189,6 +193,11 @@ edit-zone *ZONE*
     **EDITOR** is empty, *pdnsutil* falls back to using *editor*.
 get-meta *ZONE* [*ATTRIBUTE*]...
     Get zone metadata. If no *ATTRIBUTE* given, lists all known.
+hash-password [*WORK-FACTOR*]
+    This convenience command asks for a password and returns a hashed
+    and salted version, for use as a webserver password or api key.
+    An optional scrypt work factor can be specified, in power of two,
+    otherwise it defaults to 1024.
 hash-zone-record *ZONE* *RNAME*
     This convenience command hashes the name *RNAME* according to the
     NSEC3 settings of *ZONE*. Refuses to hash for zones with no NSEC3
@@ -265,7 +274,7 @@ ipencrypt *IP-ADDRESS* password
     Encrypt an IP address according to the 'ipcipher' standard
 
 ipdecrypt *IP-ADDRESS* password
-    Encrypt an IP address according to the 'ipcipher' standard
+    Decrypt an IP address according to the 'ipcipher' standard
 
 See also
 --------

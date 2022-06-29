@@ -2,6 +2,97 @@ Changelogs for 4.4.x
 ====================
 
 .. changelog::
+  :version: 4.4.7
+  :released: 5th of November 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10910
+    :tickets: 10908
+
+    A SHA-384 DS should not trump a SHA-256 one, only potentially ignore SHA-1 DS records.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10909
+    :tickets: 10905
+
+    rec_control wipe-cache-typed should check if a qtype argument is present and valid.
+
+.. changelog::
+  :version: 4.4.6
+  :released: 8th of October 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10802
+    :tickets: 10768
+
+    Use the correct RPZ policy name for statistics when loading via XFR.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10654
+    :tickets: 10643
+
+    NS from the cache could be a forwarder, take that into account for throttling decision.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10628
+    :tickets: 10627
+
+    Check in more places if the policy has been updated before using or modifying it.
+
+.. changelog::
+  :version: 4.4.5
+  :released: 30th of July 2021
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10580
+    :tickets: 10555
+
+    Work around clueless servers sending AA=0 answers.
+
+.. changelog::
+  :version: 4.4.4
+  :released: 9th of June 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10390
+
+    Check if we have room before adding zero ECS scope ENDS value.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10383
+    :tickets: 10303
+
+    Use the correct ECS address when proxy-protocol is enabled.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10385
+
+    Apply dns64 on RPZ hits generated after a gettag_ffi hit.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10314
+    :tickets: 10286
+
+    RPZ dumper: stop generating double zz labels on networks that start with zeroes.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10313
+    :tickets: 10291
+
+    Exception loading the RPZ seed file is not fatal.
+
+.. changelog::
   :version: 4.4.3
   :released: 31st of March 2021
 
@@ -69,7 +160,7 @@ Changelogs for 4.4.x
     Make sure we take the right minimum for the packet cache TTL data in the SERVFAIL case.
 
   .. change::
-    :tags: Enhancement
+    :tags: Improvements
     :pullreq: 10062
 
     Pull in libfstrm for el8 build.

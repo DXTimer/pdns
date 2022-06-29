@@ -1,5 +1,6 @@
 from __future__ import print_function
 import json
+import operator
 import time
 import unittest
 from copy import deepcopy
@@ -731,6 +732,97 @@ class AuthZones(ApiTestCase, AuthZonesHelperMixin):
             self.assertIn(k, data)
         self.assertEqual(data['name'], 'example.com.')
 
+    def test_get_zone_rrset(self):
+        rz = self.session.get(self.url("/api/v1/servers/localhost/zones"))
+        domains = rz.json()
+        example_com = [domain for domain in domains if domain['name'] == u'example.com.'][0]
+
+        # verify single record from name that has a single record
+        r = self.session.get(self.url("/api/v1/servers/localhost/zones/" + example_com['id'] + "?rrset_name=host-18000.example.com."))
+        self.assert_success_json(r)
+        data = r.json()
+        for k in ('id', 'url', 'name', 'masters', 'kind', 'last_check', 'notified_serial', 'serial', 'rrsets'):
+            self.assertIn(k, data)
+        self.assertEqual(data['rrsets'],
+            [
+                {
+                    'comments': [],
+                    'name': 'host-18000.example.com.',
+                    'records':
+                    [
+                        {
+                            'content': '192.168.1.80',
+                            'disabled': False
+                        }
+                    ],
+                    'ttl': 120,
+                    'type': 'A'
+                }
+            ]
+        )
+
+        # verify two RRsets from a name that has two types with one record each
+        powerdnssec_org = [domain for domain in domains if domain['name'] == u'powerdnssec.org.'][0]
+        r = self.session.get(self.url("/api/v1/servers/localhost/zones/" + powerdnssec_org['id'] + "?rrset_name=localhost.powerdnssec.org."))
+        self.assert_success_json(r)
+        data = r.json()
+        for k in ('id', 'url', 'name', 'masters', 'kind', 'last_check', 'notified_serial', 'serial', 'rrsets'):
+            self.assertIn(k, data)
+        self.assertEqual(sorted(data['rrsets'], key=operator.itemgetter('type')),
+            [
+                {
+                    'comments': [],
+                    'name': 'localhost.powerdnssec.org.',
+                    'records':
+                    [
+                        {
+                            'content': '127.0.0.1',
+                            'disabled': False
+                        }
+                    ],
+                    'ttl': 3600,
+                    'type': 'A'
+                },
+                {
+                    'comments': [],
+                    'name': 'localhost.powerdnssec.org.',
+                    'records':
+                    [
+                        {
+                            'content': '::1',
+                            'disabled': False
+                        }
+                    ],
+                    'ttl': 3600,
+                    'type': 'AAAA'
+                },
+            ]
+        )
+
+        # verify one RRset with one record from a name that has two, then filtered by type
+        r = self.session.get(self.url("/api/v1/servers/localhost/zones/" + powerdnssec_org['id'] + "?rrset_name=localhost.powerdnssec.org.&rrset_type=AAAA"))
+        self.assert_success_json(r)
+        data = r.json()
+        for k in ('id', 'url', 'name', 'masters', 'kind', 'last_check', 'notified_serial', 'serial', 'rrsets'):
+            self.assertIn(k, data)
+        self.assertEqual(data['rrsets'],
+            [
+                {
+                    'comments': [],
+                    'name': 'localhost.powerdnssec.org.',
+                    'records':
+                    [
+                        {
+                            'content': '::1',
+                            'disabled': False
+                        }
+                    ],
+                    'ttl': 3600,
+                    'type': 'AAAA'
+                }
+            ]
+        )
+
     def test_import_zone_broken(self):
         payload = {
             'name': 'powerdns-broken.com',
@@ -1409,14 +1501,14 @@ $ORIGIN %NAME%
         self.assertIn('Conflicts with pre-existing RRset', r.json()['error'])
 
     @parameterized.expand([
-        ('SOA', ['ns1.example.org. test@example.org. 10 10800 3600 604800 3600', 'ns2.example.org. test@example.org. 10 10800 3600 604800 3600']),
-        ('CNAME', ['01.example.org.', '02.example.org.']),
+        ('', 'SOA', ['ns1.example.org. test@example.org. 10 10800 3600 604800 3600', 'ns2.example.org. test@example.org. 10 10800 3600 604800 3600']),
+        ('sub.', 'CNAME', ['01.example.org.', '02.example.org.']),
     ])
-    def test_rrset_single_qtypes(self, qtype, contents):
+    def test_rrset_single_qtypes(self, label, qtype, contents):
         name, payload, zone = self.create_zone()
         rrset = {
             'changetype': 'replace',
-            'name': 'sub.'+name,
+            'name': label + name,
             'type': qtype,
             'ttl': 3600,
             'records': [
@@ -1467,6 +1559,101 @@ $ORIGIN %NAME%
         r = self.session.patch(self.url("/api/v1/servers/localhost/zones/" + name), data=json.dumps(payload),
                                headers={'content-type': 'application/json'})
         self.assert_success(r)  # user should be able to create DNAME at APEX as per RFC 6672 section 2.3
+
+    @parameterized.expand([
+        ('SOA', 'ns1.example.org. test@example.org. 10 10800 3600 604800 1800'),
+        ('DNSKEY', '257 3 8 AwEAAb/+pXOZWYQ8mv9WM5dFva8WU9jcIUdDuEjldbyfnkQ/xlrJC5zAEfhYhrea3SmIPmMTDimLqbh3/4SMTNPTUF+9+U1vpNfIRTFadqsmuU9Fddz3JqCcYwEpWbReg6DJOeyu+9oBoIQkPxFyLtIXEPGlQzrynKubn04Cx83I6NfzDTraJT3jLHKeW5PVc1ifqKzHz5TXdHHTA7NkJAa0sPcZCoNE1LpnJI/wcUpRUiuQhoLFeT1E432GuPuZ7y+agElGj0NnBxEgnHrhrnZWUbULpRa/il+Cr5Taj988HqX9Xdm6FjcP4Lbuds/44U7U8du224Q8jTrZ57Yvj4VDQKc='),
+    ])
+    def test_only_at_apex(self, qtype, content):
+        name, payload, zone = self.create_zone(soa_edit_api='')
+        rrset = {
+            'changetype': 'replace',
+            'name': name,
+            'type': qtype,
+            'ttl': 3600,
+            'records': [
+                {
+                    "content": content,
+                    "disabled": False
+                },
+            ]
+        }
+        payload = {'rrsets': [rrset]}
+        r = self.session.patch(
+            self.url("/api/v1/servers/localhost/zones/" + name),
+            data=json.dumps(payload),
+            headers={'content-type': 'application/json'})
+        self.assert_success(r)
+        # verify that the new record is there
+        data = self.session.get(self.url("/api/v1/servers/localhost/zones/" + name)).json()
+        self.assertEqual(get_rrset(data, name, qtype)['records'], rrset['records'])
+
+        rrset = {
+            'changetype': 'replace',
+            'name': 'sub.' + name,
+            'type': qtype,
+            'ttl': 3600,
+            'records': [
+                {
+                    "content": content,
+                    "disabled": False
+                },
+            ]
+        }
+        payload = {'rrsets': [rrset]}
+        r = self.session.patch(self.url("/api/v1/servers/localhost/zones/" + name), data=json.dumps(payload),
+                               headers={'content-type': 'application/json'})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn('only allowed at apex', r.json()['error'])
+        data = self.session.get(self.url("/api/v1/servers/localhost/zones/" + name)).json()
+        self.assertIsNone(get_rrset(data, 'sub.' + name, qtype))
+
+    @parameterized.expand([
+        ('DS', '44030 8 2 d4c3d5552b8679faeebc317e5f048b614b2e5f607dc57f1553182d49ab2179f7'),
+    ])
+    def test_not_allowed_at_apex(self, qtype, content):
+        name, payload, zone = self.create_zone()
+        rrset = {
+            'changetype': 'replace',
+            'name': name,
+            'type': qtype,
+            'ttl': 3600,
+            'records': [
+                {
+                    "content": content,
+                    "disabled": False
+                },
+            ]
+        }
+        payload = {'rrsets': [rrset]}
+        r = self.session.patch(self.url("/api/v1/servers/localhost/zones/" + name), data=json.dumps(payload),
+                               headers={'content-type': 'application/json'})
+        self.assertEqual(r.status_code, 422)
+        self.assertIn('not allowed at apex', r.json()['error'])
+        data = self.session.get(self.url("/api/v1/servers/localhost/zones/" + name)).json()
+        self.assertIsNone(get_rrset(data, 'sub.' + name, qtype))
+
+        rrset = {
+            'changetype': 'replace',
+            'name': 'sub.' + name,
+            'type': qtype,
+            'ttl': 3600,
+            'records': [
+                {
+                    "content": content,
+                    "disabled": False
+                },
+            ]
+        }
+        payload = {'rrsets': [rrset]}
+        r = self.session.patch(
+            self.url("/api/v1/servers/localhost/zones/" + name),
+            data=json.dumps(payload),
+            headers={'content-type': 'application/json'})
+        self.assert_success(r)
+        # verify that the new record is there
+        data = self.session.get(self.url("/api/v1/servers/localhost/zones/" + name)).json()
+        self.assertEqual(get_rrset(data, 'sub.' + name, qtype)['records'], rrset['records'])
 
     def test_rr_svcb(self):
         name, payload, zone = self.create_zone()

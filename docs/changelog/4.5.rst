@@ -2,13 +2,243 @@ Changelogs for 4.5.x
 ====================
 
 .. changelog::
+  :version: 4.5.2
+  :released: 10th of November 2021
+
+  This is release 4.5.2 of the Authoritative Server.
+  It contains several robustness fixes for the bindbackend, and for SOA handling.
+  These fixes are especially important for zone cache users.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10968
+
+    bindbackend: skip rejected zones during list and search
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10964
+
+    make the zone cache more robust for bad data and save some SOA queries for DNSSEC zones (Kees Monshouwer)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10962
+
+    api, check SOA location (Kees Monshouwer)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10952
+
+    improve dnsname exception handling for SOA records (Kees Monshouwer)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10792
+
+    improve SOA parse exception handling (Kees Monshouwer)
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10778
+
+    try to reload rejected zones in bind-backend once every bind-check-interval (Kees Monshouwer)
+
+.. changelog::
+  :version: 4.5.1
+  :released: 26th of July 2021
+
+  This is release 4.5.1 of the Authoritative Server.
+  It is strictly a security fix release for :doc:`Advisory 2021-01 <../security-advisories/powerdns-advisory-2021-01>`.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10611
+
+    auth: correct upper bounds on d_qtypecounters
+
+.. changelog::
+  :version: 4.5.0
+  :released: 13th of July 2021
+
+  This is release 4.5.0 of the Authoritative Server.
+  This release contains a ton of improvements and bug fixes compared to 4.4, but very few user visible changes.
+
+  There are two notable new features:
+
+  * The "zone cache", which allows PowerDNS to keep a list of zones in memory, updated periodically.
+    With this cache, PowerDNS can avoid hitting the database with queries for unknown domains.
+    In some setups, and some attack scenarios, this can make a serious performance difference.
+    Users of backends with dynamically generated zones may want to disable this or at least read the upgrade notes extremely carefully.
+    Many thanks to Chris Hofstaedtler for implementing this.
+    This work by Chris was supported by RcodeZero DNS.
+  * Priority ordering in the AXFR queue in PowerDNS running as a secondary.
+    Some users with a lot of domains (>100k) sometimes found real changes waiting behind signature refreshes on Thursdays.
+    With the new ordering, those real changes can "skip the line" and get deployed on your secondaries faster.
+    Many thanks to Robin Geuze of TransIP for implementing this.
+
+  Since 4.5.0-beta1, the zone cache is enabled by default.
+
+  Please make sure to read the :doc:`upgrade notes <../upgrading>` before upgrading.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10579
+
+    fix building without sqlite (this got broken between RC1 and RC2).
+    Thanks to our trusty FreeBSD port maintainer Ralf van der Enden for noticing and reporting this.
+
+.. changelog::
+  :version: 4.5.0-rc2
+  :released: 6th of July 2021
+
+  This is the second, and hopefully last, release candidate for version 4.5.0 of the Authoritative Server.
+  This release contains a ton of improvements and bug fixes compared to 4.4, but very few user visible changes.
+
+  There are two notable new features:
+
+  * The "zone cache", which allows PowerDNS to keep a list of zones in memory, updated periodically.
+    With this cache, PowerDNS can avoid hitting the database with queries for unknown domains.
+    In some setups, and some attack scenarios, this can make a serious performance difference.
+    Many thanks to Chris Hofstaedtler for implementing this.
+  * Priority ordering in the AXFR queue in PowerDNS running as a secondary.
+    Some users with a lot of domains (>100k) sometimes found real changes waiting behind signature refreshes on Thursdays.
+    With the new ordering, those real changes can "skip the line" and get deployed on your secondaries faster.
+    Many thanks to Robin Geuze for implementing this.
+
+  Since 4.5.0-beta1, the zone cache is enabled by default.
+
+  Please make sure to read the :doc:`upgrade notes <../upgrading>` before upgrading.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10552
+
+    bindbackend: purge caches on zone reload; store nsec3 settings at zone load
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10551
+
+    Use correct TTL when caching responses from backends (Robin Geuze)
+
+.. changelog::
+  :version: 4.5.0-rc1
+  :released: 25th of June 2021
+
+  This is the first release candidate for version 4.5.0 of the Authoritative Server.
+  This release contains a ton of improvements and bug fixes compared to 4.4, but very few user visible changes.
+
+  The one notable feature is the "zone cache", which allows PowerDNS to keep a list of zones in memory, updated periodically.
+  With this cache, PowerDNS can avoid hitting the database with queries for unknown domains.
+  In some setups, and some attack scenarios, this can make a serious performance difference.
+
+  Since 4.5.0-beta1, the zone cache is enabled by default.
+
+  Please make sure to read the :doc:`upgrade notes <../upgrading>` before upgrading.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10522
+
+    SVCB additional processing: delay inserts to avoid invalidating iterator; do not chase chains outside of zone
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10514
+
+    2136: allow placing DNSKEY/CDS/CDNSKEY regardless of direct-dnskey setting
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10513
+
+    pdnsutil edit-zone: correctly reask inc-serial question
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10512
+
+    pdnsutil add-autoprimary: print error when exiting with 1
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10511
+
+    SVCB: on parse error, throw instead of truncate
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10510
+
+    SVCB: Fix auto hints removing non-auto hints
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10509
+
+    pdnsutil create-zone: better error if default-soa-content is broken
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10373
+
+    pdnsutil add-zone-key: clarify ZSK default
+
+  .. change::
+    :tags: New Features
+    :pullreq: 9474
+
+    newCAFromRaw(): create ComboAddress from raw 4/16 byte strings, plus test
+
+.. changelog::
+  :version: 4.5.0-beta1
+  :released: 9th of June 2021
+
+  This is version 4.5.0-beta1 of the Authoritative Server.
+  This release contains a ton of improvements and bug fixes compared to 4.4, but very few user visible changes.
+
+  The one notable feature is the "zone cache", which allows PowerDNS to keep a list of zones in memory, updated periodically.
+  With this cache, PowerDNS can avoid hitting the database with queries for unknown domains.
+  In some setups, and some attack scenarios, this can make a serious performance difference.
+
+  In beta1, the zone cache is enabled by default.
+
+  Please make sure to read the :doc:`upgrade notes <../upgrading>` before upgrading.
+
+  .. change::
+    :tags: New Features
+    :pullreq: 10463
+
+    LUA records: add filterForward function, to limit the scope of createForward[6]
+
+  .. change::
+    :tags: New Features
+    :pullreq: 10454
+
+    add/fix getAllDomains() and enable the zone cache by default (Kees Monshouwer)
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10461
+
+    simplify createDomain() (Kees Monshouwer)
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10342
+
+    SVCB: rename echconfig to ech and add test vectors from draft
+
+.. changelog::
   :version: 4.5.0-alpha1
   :released: 27th of May 2021
 
   This is version 4.5.0-alpha1 of the Authoritative Server.
   This release contains a ton of improvements and bug fixes compared to 4.4, but very few user visible changes.
 
-  The one notable feature is the 'zone cache', which allows PowerDNS to keep a list of zones in memory, updated periodically.
+  The one notable feature is the "zone cache", which allows PowerDNS to keep a list of zones in memory, updated periodically.
   With this cache, PowerDNS can avoid hitting the database with queries for unknown domains.
   In some setups, and some attack scenarios, this can make a serious performance difference.
 

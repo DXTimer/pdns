@@ -1,5 +1,184 @@
 Changelogs for 4.5.X
 ====================
+.. changelog::
+  :version: 4.5.7
+  :released: 5th of November 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10912
+    :tickets: 10908
+
+    A SHA-384 DS should not trump a SHA-256 one, only potentially ignore SHA-1 DS records.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10911
+    :tickets: 10905
+
+    rec_control wipe-cache-typed should check if a qtype arg is present and valid.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10863
+    :tickets: 10842
+
+    Put the correct string into appliedPolicyTrigger for Netmask matching rules.
+
+.. changelog::
+  :version: 4.5.6
+  :released: 11th of October 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10806
+    :tickets: 10565
+
+    Do not use DNSKEYs found below an apex for validation.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10807
+    :tickets: 10622
+
+    Detect a loop when the denial of the DS comes from the child zone.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10809
+    :tickets: 10632
+
+    Match ordering of PacketID using the Birthday vs non-Birthday comparator.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10811
+    :tickets: 10633
+
+    Pass the Lua context to follow up queries (follow CNAME, dns64).
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10813
+    :tickets: 10718
+
+    Only the DNAME records are authoritative in DNAME answers.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10803
+    :tickets: 10768
+
+    Use the correct RPZ policy name for statistics when loading via XFR.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10717
+    :tickets: 10701
+
+    Fix the aggressive cache returning duplicated NSEC3 records.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10655
+    :tickets: 10643
+
+    NS from the cache could be a forwarder, take that into account for throttling decision.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10629
+    :tickets: 10627
+
+    Check in more places if the policy has been updated before using or modifying it.
+
+.. changelog::
+  :version: 4.5.5
+  :released: 30th of July 2021
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10593
+    :tickets: 10587
+
+    Ancestor NSEC3s can only deny the existence of a DS.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10575
+    :tickets: 10570
+
+    Make really sure we did not miss a cut on validation failure.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10564
+    :tickets: 10555
+
+    Work around clueless servers sending AA=0 answers.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10573
+    :tickets: 10515
+
+    Clear the current proxy protocol values each iteration.
+
+.. changelog::
+  :version: 4.5.4
+  :released: 2nd of July 2021, 4.5.3 was never released publicly.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10519
+
+    Make sure that we pass the SOA along the NSEC(3) proof for DS queries.
+
+.. changelog::
+  :version: 4.5.2
+  :released: 9th of June 2021
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10477
+    :tickets: 10440
+
+    Change nsec3-max-iterations default to 150.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10476
+    :tickets: 10460
+
+    Don't follow referral from the parent to the child for DS queries.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10475
+    :tickets: 10426
+
+    When refreshing, do not consider root almost expired.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10474
+    :tickets: 10396
+
+    Take into account q_quiet when determining loglevel and change a few loglevels.
+
+  .. change::
+    :tags: Bug Fixes
+    :pullreq: 10473
+    :tickets: 10350
+
+    Only add the NSEC and RRSIG records once in wildcard NODATA answers.
+
+  .. change::
+    :tags: Improvements
+    :pullreq: 10422
+    :tickets: 10420
+
+    For the NOD lookup case, we don't want QName Minimization.
 
 .. changelog::
   :version: 4.5.1

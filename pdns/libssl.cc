@@ -15,10 +15,14 @@
 #include <openssl/ocsp.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
+#include <fcntl.h>
 
 #ifdef HAVE_LIBSODIUM
 #include <sodium.h>
 #endif /* HAVE_LIBSODIUM */
+
+#undef CERT
+#include "misc.hh"
 
 #if (OPENSSL_VERSION_NUMBER < 0x1010000fL || (defined LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x2090100fL)
 /* OpenSSL < 1.1.0 needs support for threading/locking in the calling application. */
@@ -493,7 +497,7 @@ bool libssl_set_min_tls_version(std::unique_ptr<SSL_CTX, void(*)(SSL_CTX*)>& ctx
 
 OpenSSLTLSTicketKeysRing::OpenSSLTLSTicketKeysRing(size_t capacity)
 {
-  d_ticketKeys.set_capacity(capacity);
+  d_ticketKeys.write_lock()->set_capacity(capacity);
 }
 
 OpenSSLTLSTicketKeysRing::~OpenSSLTLSTicketKeysRing()
@@ -502,22 +506,20 @@ OpenSSLTLSTicketKeysRing::~OpenSSLTLSTicketKeysRing()
 
 void OpenSSLTLSTicketKeysRing::addKey(std::shared_ptr<OpenSSLTLSTicketKey> newKey)
 {
-  WriteLock wl(&d_lock);
-  d_ticketKeys.push_front(newKey);
+  d_ticketKeys.write_lock()->push_front(newKey);
 }
 
 std::shared_ptr<OpenSSLTLSTicketKey> OpenSSLTLSTicketKeysRing::getEncryptionKey()
 {
-  ReadLock rl(&d_lock);
-  return d_ticketKeys.front();
+  return d_ticketKeys.read_lock()->front();
 }
 
 std::shared_ptr<OpenSSLTLSTicketKey> OpenSSLTLSTicketKeysRing::getDecryptionKey(unsigned char name[TLS_TICKETS_KEY_NAME_SIZE], bool& activeKey)
 {
-  ReadLock rl(&d_lock);
-  for (auto& key : d_ticketKeys) {
+  auto keys = d_ticketKeys.read_lock();
+  for (auto& key : *keys) {
     if (key->nameMatches(name)) {
-      activeKey = (key == d_ticketKeys.front());
+      activeKey = (key == keys->front());
       return key;
     }
   }
@@ -526,8 +528,7 @@ std::shared_ptr<OpenSSLTLSTicketKey> OpenSSLTLSTicketKeysRing::getDecryptionKey(
 
 size_t OpenSSLTLSTicketKeysRing::getKeysCount()
 {
-  ReadLock rl(&d_lock);
-  return d_ticketKeys.size();
+  return d_ticketKeys.read_lock()->size();
 }
 
 void OpenSSLTLSTicketKeysRing::loadTicketsKeys(const std::string& keyFile)
@@ -782,9 +783,15 @@ static void libssl_key_log_file_callback(const SSL* ssl, const char* line)
 std::unique_ptr<FILE, int(*)(FILE*)> libssl_set_key_log_file(std::unique_ptr<SSL_CTX, void(*)(SSL_CTX*)>& ctx, const std::string& logFile)
 {
 #ifdef HAVE_SSL_CTX_SET_KEYLOG_CALLBACK
-  auto fp = std::unique_ptr<FILE, int(*)(FILE*)>(fopen(logFile.c_str(), "a"), fclose);
+  int fd = open(logFile.c_str(),  O_WRONLY | O_CREAT | O_APPEND, 0600);
+  if (fd == -1) {
+    unixDie("Error opening TLS log file '" + logFile + "'");
+  }
+  auto fp = std::unique_ptr<FILE, int(*)(FILE*)>(fdopen(fd, "a"), fclose);
   if (!fp) {
-    throw std::runtime_error("Error opening TLS log file '" + logFile + "'");
+    int error = errno; // close might clobber errno
+    close(fd);
+    throw std::runtime_error("Error opening TLS log file '" + logFile + "': " + stringerror(error));
   }
 
   SSL_CTX_set_ex_data(ctx.get(), s_keyLogIndex, fp.get());
@@ -795,6 +802,40 @@ std::unique_ptr<FILE, int(*)(FILE*)> libssl_set_key_log_file(std::unique_ptr<SSL
   return std::unique_ptr<FILE, int(*)(FILE*)>(nullptr, fclose);
 #endif /* HAVE_SSL_CTX_SET_KEYLOG_CALLBACK */
 }
+
+/* called in a client context, if the client advertised more than one ALPN values and the server returned more than one as well, to select the one to use. */
+void libssl_set_npn_select_callback(SSL_CTX* ctx, int (*cb)(SSL* s, unsigned char** out, unsigned char* outlen, const unsigned char* in, unsigned int inlen, void* arg), void* arg)
+{
+#ifdef HAVE_SSL_CTX_SET_NEXT_PROTO_SELECT_CB
+  SSL_CTX_set_next_proto_select_cb(ctx, cb, arg);
+#endif
+}
+
+void libssl_set_alpn_select_callback(SSL_CTX* ctx, int (*cb)(SSL* s, const unsigned char** out, unsigned char* outlen, const unsigned char* in, unsigned int inlen, void* arg), void* arg)
+{
+#ifdef HAVE_SSL_CTX_SET_ALPN_SELECT_CB
+  SSL_CTX_set_alpn_select_cb(ctx, cb, arg);
+#endif
+}
+
+bool libssl_set_alpn_protos(SSL_CTX* ctx, const std::vector<std::vector<uint8_t>>& protos)
+{
+#ifdef HAVE_SSL_CTX_SET_ALPN_PROTOS
+  std::vector<uint8_t> wire;
+  for (const auto& proto : protos) {
+    if (proto.size() > std::numeric_limits<uint8_t>::max()) {
+      throw std::runtime_error("Invalid ALPN value");
+    }
+    uint8_t length = proto.size();
+    wire.push_back(length);
+    wire.insert(wire.end(), proto.begin(), proto.end());
+  }
+  return SSL_CTX_set_alpn_protos(ctx, wire.data(), wire.size()) == 0;
+#else
+  return false;
+#endif
+}
+
 
 std::string libssl_get_error_string()
 {

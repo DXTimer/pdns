@@ -32,8 +32,14 @@ std::string keyConv(const T& t)
      nl -> nl0
      
   */
-  if (t.isRoot())
+  if (t.empty()) {
+    throw std::out_of_range(std::string(__PRETTY_FUNCTION__) + " Attempt to serialize an unset dnsname");
+  }
+
+  if (t.isRoot()) {
     return std::string(1, (char)0);
+  }
+
   std::string in = t.labelReverse().toDNSStringLC(); // www.ds9a.nl is now 2nl4ds9a3www0
   std::string ret;
   ret.reserve(in.size());
@@ -69,7 +75,7 @@ public:
   bool feedEnts3(int domain_id, const DNSName& domain, map<DNSName, bool>& nonterm, const NSEC3PARAMRecordContent& ns3prc, bool narrow) override;
   bool replaceRRSet(uint32_t domain_id, const DNSName& qname, const QType& qt, const vector<DNSResourceRecord>& rrset) override;
 
-  void getAllDomains(vector<DomainInfo>* domains, bool include_disabled = false) override;
+  void getAllDomains(vector<DomainInfo>* domains, bool doSerial, bool include_disabled) override;
   void lookup(const QType& type, const DNSName& qdomain, int zoneId, DNSPacket* p = nullptr) override;
   bool get(DNSResourceRecord& rr) override;
   bool get(DNSZoneRecord& dzr) override;
@@ -213,9 +219,9 @@ public:
   {
     DNSName domain;
     std::string content;
-    unsigned int flags;
-    bool active;
-    bool published;
+    unsigned int flags{0};
+    bool active{true};
+    bool published{true};
   };
   class LMDBResourceRecord : public DNSResourceRecord
   {
@@ -305,5 +311,6 @@ private:
   DNSName d_transactiondomain;
   uint32_t d_transactiondomainid;
   bool d_dolog;
+  bool d_random_ids;
   DTime d_dtime; // used only for logging
 };

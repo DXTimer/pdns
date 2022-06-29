@@ -47,9 +47,12 @@ If this is not enough, try::
 
 or::
 
-  addAction(MaxQPSIPRule(5), TCAction())
+  addAction(AndRule{MaxQPSIPRule(5), TCPRule(false)}, TCAction())
 
 This will respectively drop traffic exceeding that 5 QPS limit per IP or range, or return it with TC=1, forcing clients to fall back to TCP.
+
+In that last one, note the use of :func:`TCPRule`.
+Without it, clients would get TC=1 even if they correctly fell back to TCP.
 
 To turn this per IP or range limit into a global limit, use ``NotRule(MaxQPSRule(5000))`` instead of :func:`MaxQPSIPRule`.
 
@@ -68,6 +71,9 @@ Note that the query name is presented without a trailing dot to the regex.
 The regex is applied case insensitively.
 
 Alternatively, if compiled in, :func:`RE2Rule` provides similar functionality, but against libre2.
+
+Note that to check if a name is in a list of domains, :func:`SuffixMatchNodeRule` is preferred over complex regular expressions or multiple instances of :func:`RegexRule`.
+The :func:`makeRule` convenience function can be used to create a :func:`SuffixMatchNodeRule`.
 
 Rule Generators
 ---------------
@@ -473,7 +479,7 @@ These ``DNSRule``\ s be one of the following items:
   .. versionadded:: 1.4.0
 
   Matches DNS over HTTPS queries with a HTTP path matching the regular expression supplied in ``regex``. For example, if the query has been sent to the https://192.0.2.1:443/PowerDNS?dns=... URL, the path would be '/PowerDNS'.
-  Only valid DNS over HTTPS queries are matched. If you want to match all HTTP queries, see :meth:`DOHFrontend.setResponsesMap` instead.
+  Only valid DNS over HTTPS queries are matched. If you want to match all HTTP queries, see :meth:`DOHFrontend:setResponsesMap` instead.
 
   :param str regex: The regex to match on
 
@@ -482,7 +488,7 @@ These ``DNSRule``\ s be one of the following items:
   .. versionadded:: 1.4.0
 
   Matches DNS over HTTPS queries with a HTTP path of ``path``. For example, if the query has been sent to the https://192.0.2.1:443/PowerDNS?dns=... URL, the path would be '/PowerDNS'.
-  Only valid DNS over HTTPS queries are matched. If you want to match all HTTP queries, see :meth:`DOHFrontend.setResponsesMap` instead.
+  Only valid DNS over HTTPS queries are matched. If you want to match all HTTP queries, see :meth:`DOHFrontend:setResponsesMap` instead.
 
   :param str path: The exact HTTP path to match on
 
@@ -497,6 +503,32 @@ These ``DNSRule``\ s be one of the following items:
 
   :param KeyValueStore kvs: The key value store to query
   :param KeyValueLookupKey lookupKey: The key to use for the lookup
+
+.. function:: KeyValueStoreRangeLookupRule(kvs, lookupKey)
+
+  .. versionadded:: 1.7.0
+
+  Does a range-based lookup into the key value store referenced by 'kvs' using the key returned by 'lookupKey' and returns true if there is a range covering that key.
+
+  This assumes that there is a key, in network byte order, for the last element of the range (for example 2001:0db8:ffff:ffff:ffff:ffff:ffff:ffff for 2001:db8::/32) which contains the first element of the range (2001:0db8:0000:0000:0000:0000:0000:0000) (optionally followed by any data) as value, still in network byte order, and that there is no overlapping ranges in the database.
+  This requires that the underlying store supports ordered keys, which is true for LMDB but not for CDB.
+
+  :param KeyValueStore kvs: The key value store to query
+  :param KeyValueLookupKey lookupKey: The key to use for the lookup
+
+.. function:: LuaFFIPerThreadRule(function)
+
+  .. versionadded:: 1.7.0
+
+  Invoke a Lua FFI function that accepts a pointer to a ``dnsdist_ffi_dnsquestion_t`` object, whose bindings are defined in ``dnsdist-lua-ffi.hh``.
+
+  The ``function`` should return true if the query matches, or false otherwise. If the Lua code fails, false is returned.
+
+  The function will be invoked in a per-thread Lua state, without access to the global Lua state. All constants (:ref:`DNSQType`, :ref:`DNSRCode`, ...) are available in that per-thread context,
+  as well as all FFI functions. Objects and their bindings that are not usable in a FFI context (:class:`DNSQuestion`, :class:`DNSDistProtoBufMessage`, :class:`PacketCache`, ...)
+  are not available.
+
+  :param string function: a Lua string returning a Lua function
 
 .. function:: LuaFFIRule(function)
 
@@ -732,6 +764,21 @@ These ``DNSRule``\ s be one of the following items:
 
   :param string poolname: Pool to check
 
+.. function:: PoolOutstandingRule(poolname, limit)
+
+  .. versionadded:: 1.7.0
+
+  Check whether a pool has total outstanding queries above limit
+
+  .. code-block:: Lua
+
+    --- Send queries to spill over pool if default pool is under pressure
+    addAction(PoolOutstandingRule("", 5000), PoolAction("spillover"))
+
+  :param string poolname: Pool to check
+  :param int limit: Total outstanding limit
+
+
 Combining Rules
 ~~~~~~~~~~~~~~~
 
@@ -933,6 +980,22 @@ The following actions exist.
   The key can be based on the qname (:func:`KeyValueLookupKeyQName` and :func:`KeyValueLookupKeySuffix`),
   source IP (:func:`KeyValueLookupKeySourceIP`) or the value of an existing tag (:func:`KeyValueLookupKeyTag`).
   Subsequent rules are processed after this action.
+  Note that the tag is always created, even if there was no match, but in that case the content is empty.
+
+  :param KeyValueStore kvs: The key value store to query
+  :param KeyValueLookupKey lookupKey: The key to use for the lookup
+  :param string destinationTag: The name of the tag to store the result into
+
+.. function:: KeyValueStoreRangeLookupAction(kvs, lookupKey, destinationTag)
+
+  .. versionadded:: 1.7.0
+
+  Does a range-based lookup into the key value store referenced by 'kvs' using the key returned by 'lookupKey',
+  and storing the result if any into the tag named 'destinationTag'.
+  This assumes that there is a key in network byte order for the last element of the range (for example 2001:0db8:ffff:ffff:ffff:ffff:ffff:ffff for 2001:db8::/32) which contains the first element of the range (2001:0db8:0000:0000:0000:0000:0000:0000) (optionally followed by any data) as value, also in network byte order, and that there is no overlapping ranges in the database.
+  This requires that the underlying store supports ordered keys, which is true for LMDB but not for CDB.
+
+  Subsequent rules are processed after this action.
 
   :param KeyValueStore kvs: The key value store to query
   :param KeyValueLookupKey lookupKey: The key to use for the lookup
@@ -943,6 +1006,9 @@ The following actions exist.
   .. versionchanged:: 1.4.0
     Added the optional parameters ``verboseOnly`` and ``includeTimestamp``, made ``filename`` optional.
 
+  .. versionchanged:: 1.7.0
+    Added the ``reload`` method.
+
   Log a line for each query, to the specified ``file`` if any, to the console (require verbose) if the empty string is given as filename.
 
   If an empty string is supplied in the file name, the logging is done to stdout, and only in verbose mode by default. This can be changed by setting ``verboseOnly`` to false.
@@ -951,6 +1017,8 @@ The following actions exist.
 
   The ``append`` optional parameter specifies whether we open the file for appending or truncate each time (default).
   The ``buffered`` optional parameter specifies whether writes to the file are buffered (default) or not.
+
+  Since 1.7.0 calling the ``reload()`` method on the object will cause it to close and re-open the log file, for rotation purposes.
 
   Subsequent rules are processed after this action.
 
@@ -965,12 +1033,17 @@ The following actions exist.
 
   .. versionadded:: 1.5.0
 
+  .. versionchanged:: 1.7.0
+    Added the ``reload`` method.
+
   Log a line for each response, to the specified ``file`` if any, to the console (require verbose) if the empty string is given as filename.
 
   If an empty string is supplied in the file name, the logging is done to stdout, and only in verbose mode by default. This can be changed by setting ``verboseOnly`` to false.
 
   The ``append`` optional parameter specifies whether we open the file for appending or truncate each time (default).
   The ``buffered`` optional parameter specifies whether writes to the file are buffered (default) or not.
+
+  Since 1.7.0 calling the ``reload()`` method on the object will cause it to close and re-open the log file, for rotation purposes.
 
   Subsequent rules are processed after this action.
 
@@ -997,6 +1070,34 @@ The following actions exist.
   The ``function`` should return a :ref:`DNSAction`. If the Lua code fails, ServFail is returned.
 
   :param string function: the name of a Lua function
+
+.. function:: LuaFFIPerThreadAction(function)
+
+  .. versionadded:: 1.7.0
+
+  Invoke a Lua FFI function that accepts a pointer to a ``dnsdist_ffi_dnsquestion_t`` object, whose bindings are defined in ``dnsdist-lua-ffi.hh``.
+
+  The ``function`` should return a :ref:`DNSAction`. If the Lua code fails, ServFail is returned.
+
+  The function will be invoked in a per-thread Lua state, without access to the global Lua state. All constants (:ref:`DNSQType`, :ref:`DNSRCode`, ...) are available in that per-thread context,
+  as well as all FFI functions. Objects and their bindings that are not usable in a FFI context (:class:`DNSQuestion`, :class:`DNSDistProtoBufMessage`, :class:`PacketCache`, ...)
+  are not available.
+
+  :param string function: a Lua string returning a Lua function
+
+.. function:: LuaFFIPerThreadResponseAction(function)
+
+  .. versionadded:: 1.7.0
+
+  Invoke a Lua FFI function that accepts a pointer to a ``dnsdist_ffi_dnsquestion_t`` object, whose bindings are defined in ``dnsdist-lua-ffi.hh``.
+
+  The ``function`` should return a :ref:`DNSResponseAction`. If the Lua code fails, ServFail is returned.
+
+  The function will be invoked in a per-thread Lua state, without access to the global Lua state. All constants (:ref:`DNSQType`, :ref:`DNSRCode`, ...) are available in that per-thread context,
+  as well as all FFI functions. Objects and their bindings that are not usable in a FFI context (:class:`DNSQuestion`, :class:`DNSDistProtoBufMessage`, :class:`PacketCache`, ...)
+  are not available.
+
+  :param string function: a Lua string returning a Lua function
 
 .. function:: LuaFFIResponseAction(function)
 
@@ -1206,6 +1307,16 @@ The following actions exist.
   :param int v4: The IPv4 netmask length
   :param int v6: The IPv6 netmask length
 
+.. function:: SetEDNSOptionAction(option)
+
+  .. versionadded:: 1.7.0
+
+  Add arbitrary EDNS option and data to the query. Any existing EDNS content with the same option code will be overwritten.
+  Subsequent rules are processed after this action.
+
+  :param int option: The EDNS option number
+  :param string data: The EDNS0 option raw content
+
 .. function:: SetMacAddrAction(option)
 
   .. versionadded:: 1.6.0
@@ -1281,7 +1392,11 @@ The following actions exist.
 
   .. versionadded:: 1.6.0
 
+  .. versionchanged:: 1.7.0
+    Prior to 1.7.0 :func:`SetTagAction` would not overwrite an existing tag value if already set.
+
   Associate a tag named ``name`` with a value of ``value`` to this query, that will be passed on to the response.
+  This function will overwrite any existing tag value.
   Subsequent rules are processed after this action.
   Note that this function was called :func:`TagAction` before 1.6.0.
 
@@ -1292,7 +1407,11 @@ The following actions exist.
 
   .. versionadded:: 1.6.0
 
+  .. versionchanged:: 1.7.0
+    Prior to 1.7.0 :func:`SetTagResponseAction` would not overwrite an existing tag value if already set.
+
   Associate a tag named ``name`` with a value of ``value`` to this response.
+  This function will overwrite any existing tag value.
   Subsequent rules are processed after this action.
   Note that this function was called :func:`TagResponseAction` before 1.6.0.
 
@@ -1417,6 +1536,24 @@ The following actions exist.
   * ``ra``: bool - Set the RA bit to this value (true means the bit is set, false means it's cleared). Default is to copy the value of the RD bit from the incoming query.
   * ``ttl``: int - The TTL of the record.
 
+.. function:: SpoofSVCAction(svcParams [, options])
+
+  .. versionadded:: 1.7.0
+
+  Forge a response with the specified SVC record data. If the list contains more than one class:`SVCRecordParameters` (generated via :func:`newSVCRecordParameters`) object, they are all returned,
+  and should have different priorities.
+  The hints provided in the SVC parameters, if any, will also be added as A/AAAA records in the additional section, using the target name present in the parameters as owner name if it's not empty (root) and the qname instead.
+
+  :param list of class:`SVCRecordParameters` svcParams: The record data to return
+  :param table options: A table with key: value pairs with options.
+
+  Options:
+
+  * ``aa``: bool - Set the AA bit to this value (true means the bit is set, false means it's cleared). Default is to clear it.
+  * ``ad``: bool - Set the AD bit to this value (true means the bit is set, false means it's cleared). Default is to clear it.
+  * ``ra``: bool - Set the RA bit to this value (true means the bit is set, false means it's cleared). Default is to copy the value of the RD bit from the incoming query.
+  * ``ttl``: int - The TTL of the record.
+
 .. function:: TagAction(name, value)
 
   .. deprecated:: 1.6.0
@@ -1441,7 +1578,12 @@ The following actions exist.
 
 .. function:: TCAction()
 
+  .. versionchanged:: 1.7.0
+    This action is now only performed over UDP transports.
+
   Create answer to query with the TC bit set, and the RA bit set to the value of RD in the query, to force the client to TCP.
+  Before 1.7.0 this action was performed even when the query had been received over TCP, which required the use of :func:`TCPRule` to
+  prevent the TC bit from being set over TCP transports.
 
 .. function:: TeeAction(remote[, addECS])
 

@@ -40,6 +40,7 @@
 #include "gettime.hh"
 #include "htmlfiles.h"
 #include "threadname.hh"
+#include "sodcrypto.hh"
 #include "sstuff.hh"
 
 struct WebserverConfig
@@ -49,20 +50,48 @@ struct WebserverConfig
     acl.toMasks("127.0.0.1, ::1");
   }
 
-  std::mutex lock;
   NetmaskGroup acl;
-  std::string password;
-  std::string apiKey;
+  std::unique_ptr<CredentialsHolder> password;
+  std::unique_ptr<CredentialsHolder> apiKey;
   boost::optional<std::map<std::string, std::string> > customHeaders;
   bool statsRequireAuthentication{true};
 };
 
 bool g_apiReadWrite{false};
-WebserverConfig g_webserverConfig;
+LockGuarded<WebserverConfig> g_webserverConfig;
 std::string g_apiConfigDirectory;
 static const MetricDefinitionStorage s_metricDefinitions;
 
 static ConcurrentConnectionManager s_connManager(100);
+
+std::string getWebserverConfig()
+{
+  ostringstream out;
+
+  {
+    auto config = g_webserverConfig.lock();
+    out << "Current web server configuration:" << endl;
+    out << "ACL: " << config->acl.toString() << endl;
+    out << "Custom headers: ";
+    if (config->customHeaders) {
+      out << endl;
+      for (const auto& header : *config->customHeaders) {
+        out << " - " << header.first << ": " << header.second << endl;
+      }
+    }
+    else {
+      out << "None" << endl;
+    }
+    out << "Statistics require authentication: " << (config->statsRequireAuthentication ? "yes" : "no") << endl;
+    out << "Password: " << (config->password ? "set" : "unset") << endl;
+    out << "API key: " << (config->apiKey ? "set" : "unset") << endl;
+  }
+  out << "API writable: " << (g_apiReadWrite ? "yes" : "no") << endl;
+  out << "API configuration directory: " << g_apiConfigDirectory << endl;
+  out << "Maximum concurrent connections: " << s_connManager.getMaxConcurrentConnections() << endl;
+
+  return out.str();
+}
 
 class WebClientConnection
 {
@@ -152,6 +181,12 @@ const std::map<std::string, MetricDefinition> MetricDefinitionStorage::metrics{
   { "udp-noport-errors",      MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp NoPorts") },
   { "udp-recvbuf-errors",     MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp RcvbufErrors") },
   { "udp-sndbuf-errors",      MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp SndbufErrors") },
+  { "udp-csum-errors",        MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp InCsumErrors") },
+  { "udp6-in-errors",         MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp6 Udp6InErrors") },
+  { "udp6-recvbuf-errors",    MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp6 Udp6RcvbufErrors") },
+  { "udp6-sndbuf-errors",     MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp6 Udp6SndbufErrors") },
+  { "udp6-noport-errors",     MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp6 Udp6NoPorts") },
+  { "udp6-in-csum-errors",    MetricDefinition(PrometheusMetricType::counter, "From /proc/net/snmp6 Udp6InCsumErrors") },
   { "tcp-listen-overflows",   MetricDefinition(PrometheusMetricType::counter, "From /proc/net/netstat ListenOverflows") },
   { "proxy-protocol-invalid", MetricDefinition(PrometheusMetricType::counter, "Number of queries dropped because of an invalid Proxy Protocol header") },
 };
@@ -197,21 +232,21 @@ static void apiSaveACL(const NetmaskGroup& nmg)
   apiWriteConfigFile("acl", content);
 }
 
-static bool checkAPIKey(const YaHTTP::Request& req, const string& expectedApiKey)
+static bool checkAPIKey(const YaHTTP::Request& req, const std::unique_ptr<CredentialsHolder>& apiKey)
 {
-  if (expectedApiKey.empty()) {
+  if (!apiKey) {
     return false;
   }
 
   const auto header = req.headers.find("x-api-key");
   if (header != req.headers.end()) {
-    return (header->second == expectedApiKey);
+    return apiKey->matches(header->second);
   }
 
   return false;
 }
 
-static bool checkWebPassword(const YaHTTP::Request& req, const string &expected_password)
+static bool checkWebPassword(const YaHTTP::Request& req, const std::unique_ptr<CredentialsHolder>& password)
 {
   static const char basicStr[] = "basic ";
 
@@ -227,7 +262,10 @@ static bool checkWebPassword(const YaHTTP::Request& req, const string &expected_
     stringtok(cparts, plain, ":");
 
     if (cparts.size() == 2) {
-      return cparts[1] == expected_password;
+      if (password) {
+        return password->matches(cparts.at(1));
+      }
+      return true;
     }
   }
 
@@ -251,26 +289,26 @@ static bool isAStatsRequest(const YaHTTP::Request& req)
 
 static bool handleAuthorization(const YaHTTP::Request& req)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
+  auto config = g_webserverConfig.lock();
 
   if (isAStatsRequest(req)) {
-    if (g_webserverConfig.statsRequireAuthentication) {
+    if (config->statsRequireAuthentication) {
       /* Access to the stats is allowed for both API and Web users */
-      return checkAPIKey(req, g_webserverConfig.apiKey) || checkWebPassword(req, g_webserverConfig.password);
+      return checkAPIKey(req, config->apiKey) || checkWebPassword(req, config->password);
     }
     return true;
   }
 
   if (isAnAPIRequest(req)) {
     /* Access to the API requires a valid API key */
-    if (checkAPIKey(req, g_webserverConfig.apiKey)) {
+    if (checkAPIKey(req, config->apiKey)) {
       return true;
     }
 
-    return isAnAPIRequestAllowedWithWebAuth(req) && checkWebPassword(req, g_webserverConfig.password);
+    return isAnAPIRequestAllowedWithWebAuth(req) && checkWebPassword(req, config->password);
   }
 
-  return checkWebPassword(req, g_webserverConfig.password);
+  return checkWebPassword(req, config->password);
 }
 
 static bool isMethodAllowed(const YaHTTP::Request& req)
@@ -288,8 +326,7 @@ static bool isMethodAllowed(const YaHTTP::Request& req)
 
 static bool isClientAllowedByACL(const ComboAddress& remote)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-  return g_webserverConfig.acl.match(remote);
+  return g_webserverConfig.lock()->acl.match(remote);
 }
 
 static void handleCORS(const YaHTTP::Request& req, YaHTTP::Response& resp)
@@ -489,6 +526,8 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
   output << "# TYPE " << statesbase << "tcpavgqueriesperconn "        << "gauge"                                                             << "\n";
   output << "# HELP " << statesbase << "tcpavgconnduration "          << "The average duration of a TCP connection (ms)"                     << "\n";
   output << "# TYPE " << statesbase << "tcpavgconnduration "          << "gauge"                                                             << "\n";
+  output << "# HELP " << statesbase << "tlsresumptions "              << "The number of times a TLS session has been resumed"                << "\n";
+  output << "# TYPE " << statesbase << "tlsersumptions "              << "counter"                                                           << "\n";
 
   for (const auto& state : *states) {
     string serverName;
@@ -507,7 +546,8 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
     output << statesbase << "queries"                      << label << " " << state->queries.load()              << "\n";
     output << statesbase << "responses"                    << label << " " << state->responses.load()            << "\n";
     output << statesbase << "drops"                        << label << " " << state->reuseds.load()              << "\n";
-    output << statesbase << "latency"                      << label << " " << state->latencyUsec/1000.0          << "\n";
+    if (state->isUp())
+        output << statesbase << "latency"                  << label << " " << state->latencyUsec/1000.0          << "\n";
     output << statesbase << "senderrors"                   << label << " " << state->sendErrors.load()           << "\n";
     output << statesbase << "outstanding"                  << label << " " << state->outstanding.load()          << "\n";
     output << statesbase << "order"                        << label << " " << state->order                       << "\n";
@@ -517,13 +557,14 @@ static void handlePrometheus(const YaHTTP::Request& req, YaHTTP::Response& resp)
     output << statesbase << "tcpgaveup"                    << label << " " << state->tcpGaveUp                   << "\n";
     output << statesbase << "tcpreadtimeouts"              << label << " " << state->tcpReadTimeouts             << "\n";
     output << statesbase << "tcpwritetimeouts"             << label << " " << state->tcpWriteTimeouts            << "\n";
-    output << statesbase << "tcpconnecttimeouts"           << label << " " << state->tcpConnectTimeouts         << "\n";
+    output << statesbase << "tcpconnecttimeouts"           << label << " " << state->tcpConnectTimeouts          << "\n";
     output << statesbase << "tcpcurrentconnections"        << label << " " << state->tcpCurrentConnections       << "\n";
     output << statesbase << "tcpmaxconcurrentconnections"  << label << " " << state->tcpMaxConcurrentConnections << "\n";
     output << statesbase << "tcpnewconnections"            << label << " " << state->tcpNewConnections           << "\n";
     output << statesbase << "tcpreusedconnections"         << label << " " << state->tcpReusedConnections        << "\n";
     output << statesbase << "tcpavgqueriesperconn"         << label << " " << state->tcpAvgQueriesPerConnection  << "\n";
     output << statesbase << "tcpavgconnduration"           << label << " " << state->tcpAvgConnectionDuration    << "\n";
+    output << statesbase << "tlsresumptions"               << label << " " << state->tlsResumptions              << "\n";
   }
 
   const string frontsbase = "dnsdist_frontend_";
@@ -871,6 +912,64 @@ static void handleJSONStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   }
 }
 
+static void addServerToJSON(Json::array& servers, int id, const std::shared_ptr<DownstreamState>& a)
+{
+  string status;
+  if (a->availability == DownstreamState::Availability::Up) {
+    status = "UP";
+  }
+  else if (a->availability == DownstreamState::Availability::Down) {
+    status = "DOWN";
+  }
+  else {
+    status = (a->upStatus ? "up" : "down");
+  }
+
+  Json::array pools;
+  for(const auto& p: a->pools) {
+    pools.push_back(p);
+  }
+
+  Json::object server {
+    {"id", id},
+    {"name", a->getName()},
+    {"address", a->remote.toStringWithPort()},
+    {"state", status},
+    {"qps", (double)a->queryLoad},
+    {"qpsLimit", (double)a->qps.getRate()},
+    {"outstanding", (double)a->outstanding},
+    {"reuseds", (double)a->reuseds},
+    {"weight", (double)a->weight},
+    {"order", (double)a->order},
+    {"pools", pools},
+    {"latency", (double)(a->latencyUsec/1000.0)},
+    {"queries", (double)a->queries},
+    {"responses", (double)a->responses},
+    {"sendErrors", (double)a->sendErrors},
+    {"tcpDiedSendingQuery", (double)a->tcpDiedSendingQuery},
+    {"tcpDiedReadingResponse", (double)a->tcpDiedReadingResponse},
+    {"tcpGaveUp", (double)a->tcpGaveUp},
+    {"tcpConnectTimeouts", (double)a->tcpConnectTimeouts},
+    {"tcpReadTimeouts", (double)a->tcpReadTimeouts},
+    {"tcpWriteTimeouts", (double)a->tcpWriteTimeouts},
+    {"tcpCurrentConnections", (double)a->tcpCurrentConnections},
+    {"tcpMaxConcurrentConnections", (double)a->tcpMaxConcurrentConnections},
+    {"tcpNewConnections", (double)a->tcpNewConnections},
+    {"tcpReusedConnections", (double)a->tcpReusedConnections},
+    {"tcpAvgQueriesPerConnection", (double)a->tcpAvgQueriesPerConnection},
+    {"tcpAvgConnectionDuration", (double)a->tcpAvgConnectionDuration},
+    {"tlsResumptions", (double)a->tlsResumptions},
+    {"dropRate", (double)a->dropRate}
+  };
+
+  /* sending a latency for a DOWN server doesn't make sense */
+  if (a->availability == DownstreamState::Availability::Down) {
+    server["latency"] = nullptr;
+  }
+
+  servers.push_back(std::move(server));
+}
+
 static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
 {
   handleCORS(req, resp);
@@ -880,55 +979,7 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   auto localServers = g_dstates.getLocal();
   int num = 0;
   for (const auto& a : *localServers) {
-    string status;
-    if(a->availability == DownstreamState::Availability::Up)
-      status = "UP";
-    else if(a->availability == DownstreamState::Availability::Down)
-      status = "DOWN";
-    else
-      status = (a->upStatus ? "up" : "down");
-
-    Json::array pools;
-    for(const auto& p: a->pools)
-      pools.push_back(p);
-
-    Json::object server{
-      {"id", num++},
-      {"name", a->getName()},
-      {"address", a->remote.toStringWithPort()},
-      {"state", status},
-      {"qps", (double)a->queryLoad},
-      {"qpsLimit", (double)a->qps.getRate()},
-      {"outstanding", (double)a->outstanding},
-      {"reuseds", (double)a->reuseds},
-      {"weight", (double)a->weight},
-      {"order", (double)a->order},
-      {"pools", pools},
-      {"latency", (double)(a->latencyUsec/1000.0)},
-      {"queries", (double)a->queries},
-      {"responses", (double)a->responses},
-      {"sendErrors", (double)a->sendErrors},
-      {"tcpDiedSendingQuery", (double)a->tcpDiedSendingQuery},
-      {"tcpDiedReadingResponse", (double)a->tcpDiedReadingResponse},
-      {"tcpGaveUp", (double)a->tcpGaveUp},
-      {"tcpConnectTimeouts", (double)a->tcpConnectTimeouts},
-      {"tcpReadTimeouts", (double)a->tcpReadTimeouts},
-      {"tcpWriteTimeouts", (double)a->tcpWriteTimeouts},
-      {"tcpCurrentConnections", (double)a->tcpCurrentConnections},
-      {"tcpMaxConcurrentConnections", (double)a->tcpMaxConcurrentConnections},
-      {"tcpNewConnections", (double)a->tcpNewConnections},
-      {"tcpReusedConnections", (double)a->tcpReusedConnections},
-      {"tcpAvgQueriesPerConnection", (double)a->tcpAvgQueriesPerConnection},
-      {"tcpAvgConnectionDuration", (double)a->tcpAvgConnectionDuration},
-      {"dropRate", (double)a->dropRate}
-    };
-
-    /* sending a latency for a DOWN server doesn't make sense */
-    if (a->availability == DownstreamState::Availability::Down) {
-      server["latency"] = nullptr;
-    }
-
-    servers.push_back(server);
+    addServerToJSON(servers, num++, a);
   }
 
   Json::array frontends;
@@ -1101,6 +1152,57 @@ static void handleStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
   resp.body = my_json.dump();
 }
 
+static void handlePoolStats(const YaHTTP::Request& req, YaHTTP::Response& resp)
+{
+  handleCORS(req, resp);
+  const auto poolName = req.getvars.find("name");
+  if (poolName == req.getvars.end()) {
+    resp.status = 400;
+    return;
+  }
+
+  resp.status = 200;
+  Json::array doc;
+
+  auto localPools = g_pools.getLocal();
+  const auto poolIt = localPools->find(poolName->second);
+  if (poolIt == localPools->end()) {
+    resp.status = 404;
+    return;
+  }
+
+  const auto& pool = poolIt->second;
+  const auto& cache = pool->packetCache;
+  Json::object entry {
+    { "name", poolName->second },
+    { "serversCount", (double) pool->countServers(false) },
+    { "cacheSize", (double) (cache ? cache->getMaxEntries() : 0) },
+    { "cacheEntries", (double) (cache ? cache->getEntriesCount() : 0) },
+    { "cacheHits", (double) (cache ? cache->getHits() : 0) },
+    { "cacheMisses", (double) (cache ? cache->getMisses() : 0) },
+    { "cacheDeferredInserts", (double) (cache ? cache->getDeferredInserts() : 0) },
+    { "cacheDeferredLookups", (double) (cache ? cache->getDeferredLookups() : 0) },
+    { "cacheLookupCollisions", (double) (cache ? cache->getLookupCollisions() : 0) },
+    { "cacheInsertCollisions", (double) (cache ? cache->getInsertCollisions() : 0) },
+    { "cacheTTLTooShorts", (double) (cache ? cache->getTTLTooShorts() : 0) }
+  };
+
+  Json::array servers;
+  int num = 0;
+  for (const auto& a : *pool->getServers()) {
+    addServerToJSON(servers, num, a.second);
+    num++;
+  }
+
+  resp.headers["Content-Type"] = "application/json";
+  Json my_json = Json::object {
+    { "stats", entry },
+    { "servers", servers }
+  };
+
+  resp.body = my_json.dump();
+}
+
 static void handleStatsOnly(const YaHTTP::Request& req, YaHTTP::Response& resp)
 {
   handleCORS(req, resp);
@@ -1257,6 +1359,11 @@ void registerWebHandler(const std::string& endpoint, std::function<void(const Ya
   s_webHandlers[endpoint] = handler;
 }
 
+void clearWebHandlers()
+{
+  s_webHandlers.clear();
+}
+
 static void redirectToIndex(const YaHTTP::Request& req, YaHTTP::Response& resp)
 {
   const string charset = "; charset=utf-8";
@@ -1297,6 +1404,7 @@ void registerBuiltInWebHandlers()
   registerWebHandler("/jsonstat", handleJSONStats);
   registerWebHandler("/metrics", handlePrometheus);
   registerWebHandler("/api/v1/servers/localhost", handleStats);
+  registerWebHandler("/api/v1/servers/localhost/pool", handlePoolStats);
   registerWebHandler("/api/v1/servers/localhost/statistics", handleStatsOnly);
   registerWebHandler("/api/v1/servers/localhost/config", handleConfigDump);
   registerWebHandler("/api/v1/servers/localhost/config/allow-from", handleAllowFrom);
@@ -1339,10 +1447,10 @@ static void connectionThread(WebClientConnection&& conn)
     resp.version = req.version;
 
     {
-      std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
+      auto config = g_webserverConfig.lock();
 
-      addCustomHeaders(resp, g_webserverConfig.customHeaders);
-      addSecurityHeaders(resp, g_webserverConfig.customHeaders);
+      addCustomHeaders(resp, config->customHeaders);
+      addSecurityHeaders(resp, config->customHeaders);
     }
     /* indicate that the connection will be closed after completion of the response */
     resp.headers["Connection"] = "close";
@@ -1393,22 +1501,20 @@ static void connectionThread(WebClientConnection&& conn)
   }
 }
 
-void setWebserverAPIKey(const boost::optional<std::string> apiKey)
+void setWebserverAPIKey(std::unique_ptr<CredentialsHolder>&& apiKey)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
+  auto config = g_webserverConfig.lock();
 
   if (apiKey) {
-    g_webserverConfig.apiKey = *apiKey;
+    config->apiKey = std::move(apiKey);
   } else {
-    g_webserverConfig.apiKey.clear();
+    config->apiKey.reset();
   }
 }
 
-void setWebserverPassword(const std::string& password)
+void setWebserverPassword(std::unique_ptr<CredentialsHolder>&& password)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-
-  g_webserverConfig.password = password;
+  g_webserverConfig.lock()->password = std::move(password);
 }
 
 void setWebserverACL(const std::string& acl)
@@ -1416,24 +1522,17 @@ void setWebserverACL(const std::string& acl)
   NetmaskGroup newACL;
   newACL.toMasks(acl);
 
-  {
-    std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-    g_webserverConfig.acl = std::move(newACL);
-  }
+  g_webserverConfig.lock()->acl = std::move(newACL);
 }
 
 void setWebserverCustomHeaders(const boost::optional<std::map<std::string, std::string> > customHeaders)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-
-  g_webserverConfig.customHeaders = customHeaders;
+  g_webserverConfig.lock()->customHeaders = customHeaders;
 }
 
 void setWebserverStatsRequireAuthentication(bool require)
 {
-  std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-
-  g_webserverConfig.statsRequireAuthentication = require;
+  g_webserverConfig.lock()->statsRequireAuthentication = require;
 }
 
 void setWebserverMaxConcurrentConnections(size_t max)
@@ -1446,11 +1545,8 @@ void dnsdistWebserverThread(int sock, const ComboAddress& local)
   setThreadName("dnsdist/webserv");
   warnlog("Webserver launched on %s", local.toStringWithPort());
 
-  {
-    std::lock_guard<std::mutex> lock(g_webserverConfig.lock);
-    if (g_webserverConfig.password.empty()) {
-      warnlog("Webserver launched on %s without a password set!", local.toStringWithPort());
-    }
+  if (!g_webserverConfig.lock()->password) {
+    warnlog("Webserver launched on %s without a password set!", local.toStringWithPort());
   }
 
   for(;;) {
